@@ -1,0 +1,24 @@
+# Build artefacts
+cshim/lib/
+cshim/*.o
+*.exe
+*.dll
+*.lib
+*.a
+*.o
+
+# Go
+bin/
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store

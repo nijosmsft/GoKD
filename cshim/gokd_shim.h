@@ -1,0 +1,405 @@
+/*
+ * gokd_shim.h — GoKD C shim public API
+ *
+ * This is the ONLY header included by CGo. It exposes a flat C API over
+ * the Windows DbgEng COM interfaces (IDebugClient6, IDebugControl6,
+ * IDebugDataSpaces4, IDebugSymbols5, IDebugRegisters2,
+ * IDebugSystemObjects4, IDebugAdvanced3) and DbgHelp.
+ *
+ * All COM state lives inside the shim. Callers hold an opaque uint64_t
+ * session handle. No COM objects, C++ types, or wchar_t strings cross
+ * this boundary.
+ *
+ * String encoding: all char* parameters are UTF-8. The shim converts
+ * to/from UTF-16 internally before calling DbgEng/DbgHelp.
+ *
+ * Error convention: functions returning int32_t return an HRESULT.
+ *   S_OK  (0)  = success
+ *   < 0        = failure (standard HRESULT error code)
+ * gokd_create_session() returns 0 on failure.
+ */
+
+#pragma once
+
+#include <stdint.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ====================================================================== */
+/*  Opaque session handle                                                 */
+/* ====================================================================== */
+
+typedef uint64_t gokd_session_t; /* 0 = invalid */
+
+/* ====================================================================== */
+/*  Data structures                                                       */
+/* ====================================================================== */
+
+/* Stack frame */
+typedef struct {
+    uint64_t instruction_offset;
+    uint64_t return_offset;
+    uint64_t frame_offset;
+    uint64_t stack_offset;
+    char     module[256];
+    char     function[512];
+    uint64_t displacement;
+    char     source_file[512];
+    uint32_t source_line;
+} gokd_frame_t;
+
+/* Register */
+typedef struct {
+    char     name[64];
+    uint64_t value;
+    uint32_t type;   /* GOKD_REG_TYPE_* */
+    uint8_t  valid;
+} gokd_register_t;
+
+#define GOKD_REG_TYPE_INT8      0
+#define GOKD_REG_TYPE_INT16     1
+#define GOKD_REG_TYPE_INT32     2
+#define GOKD_REG_TYPE_INT64     3
+#define GOKD_REG_TYPE_FLOAT32   4
+#define GOKD_REG_TYPE_FLOAT64   5
+#define GOKD_REG_TYPE_FLOAT80   6
+#define GOKD_REG_TYPE_VECTOR128 7
+
+/* Module */
+typedef struct {
+    char     name[256];       /* short name, no path */
+    char     image_name[512]; /* full image path */
+    uint64_t base;
+    uint32_t size;
+    uint32_t timestamp;
+    uint32_t checksum;
+} gokd_module_t;
+
+/* Thread */
+typedef struct {
+    uint32_t system_id;
+    uint64_t handle;
+    uint64_t data_offset;
+    uint64_t start_offset;
+} gokd_thread_t;
+
+/* Breakpoint */
+typedef struct {
+    uint32_t id;
+    uint64_t offset;
+    char     expression[512];
+    uint32_t flags;   /* DEBUG_BREAKPOINT_* flags */
+    uint32_t enabled;
+} gokd_bp_t;
+
+/* Type field */
+typedef struct {
+    char     name[256];
+    uint32_t offset;      /* byte offset within parent struct */
+    uint64_t size;        /* size in bytes */
+    char     type_name[256];
+} gokd_field_t;
+
+/* ====================================================================== */
+/*  Event types                                                           */
+/* ====================================================================== */
+
+#define GOKD_EVENT_BREAKPOINT      1
+#define GOKD_EVENT_EXCEPTION       2
+#define GOKD_EVENT_THREAD_CREATED  3
+#define GOKD_EVENT_THREAD_EXITED   4
+#define GOKD_EVENT_PROC_CREATED    5
+#define GOKD_EVENT_PROC_EXITED     6
+#define GOKD_EVENT_MOD_LOADED      7
+#define GOKD_EVENT_MOD_UNLOADED    8
+
+/* Stop reasons (returned by gokd_go/step_in/step_over/step_out) */
+#define GOKD_STOP_BREAKPOINT    1
+#define GOKD_STOP_STEP          2
+#define GOKD_STOP_EXCEPTION     3
+#define GOKD_STOP_PROC_EXIT     4
+
+/* Stop event — returned by execution commands */
+typedef struct {
+    uint32_t reason;          /* GOKD_STOP_* */
+    uint64_t address;
+    uint32_t thread_sys_id;
+    /* Exception details (valid when reason == GOKD_STOP_EXCEPTION) */
+    uint32_t exception_code;
+    uint32_t exception_first_chance;
+} gokd_stop_event_t;
+
+/* Event data structs — passed as const void* to gokd_event_fn */
+
+typedef struct {
+    uint32_t bp_id;
+    uint64_t address;
+    uint32_t thread_sys_id;
+} gokd_ev_breakpoint_t;
+
+typedef struct {
+    uint32_t code;
+    uint64_t address;
+    uint32_t first_chance;
+    uint32_t thread_sys_id;
+} gokd_ev_exception_t;
+
+typedef struct {
+    uint32_t sys_id;
+    uint64_t handle;
+    uint64_t data_offset;
+    uint64_t start_offset;
+} gokd_ev_thread_created_t;
+
+typedef struct {
+    uint32_t sys_id;
+    uint32_t exit_code;
+} gokd_ev_thread_exited_t;
+
+typedef struct {
+    uint64_t base_offset;
+    uint32_t module_size;
+    char     module_name[256];
+    char     image_name[512];
+} gokd_ev_proc_created_t;
+
+typedef struct {
+    uint32_t exit_code;
+} gokd_ev_proc_exited_t;
+
+typedef struct {
+    uint64_t base_offset;
+    uint32_t module_size;
+    char     module_name[256];
+    char     image_name[512];
+} gokd_ev_mod_loaded_t;
+
+typedef struct {
+    uint64_t base_offset;
+    char     image_base_name[256];
+} gokd_ev_mod_unloaded_t;
+
+/* ====================================================================== */
+/*  Callbacks                                                             */
+/* ====================================================================== */
+
+/*
+ * Event callback: fired from the dispatch thread during WaitForEvent.
+ * event_type is one of GOKD_EVENT_*.
+ * event_data points to the matching gokd_ev_*_t struct (valid for the
+ * duration of the call only).
+ */
+typedef void (*gokd_event_fn)(gokd_session_t s, int event_type,
+                               const void *event_data, void *ctx);
+
+/* Output callback: fired from the dispatch thread. */
+typedef void (*gokd_output_fn)(uint32_t mask, const char *text, void *ctx);
+
+/* ====================================================================== */
+/*  Session lifecycle                                                     */
+/* ====================================================================== */
+
+/*
+ * Create a new debug session. Returns 0 on failure.
+ * Internally calls CoInitializeEx(MTA) and DebugCreate on the calling
+ * thread — the caller MUST ensure this runs on the dedicated dispatch
+ * thread.
+ */
+gokd_session_t gokd_create_session(void);
+
+/*
+ * Destroy a session and release all COM interfaces.
+ * Must be called from the dispatch thread.
+ */
+void gokd_destroy_session(gokd_session_t s);
+
+/* Return the HRESULT from the most recent failed call. */
+int32_t gokd_get_last_error(gokd_session_t s);
+
+/* ====================================================================== */
+/*  Attach modes                                                          */
+/* ====================================================================== */
+
+/*
+ * Attach to a running process.
+ * flags: 0 = default (invasive), or DEBUG_ATTACH_NONINVASIVE, etc.
+ * Calls WaitForEvent internally to wait for the initial break.
+ */
+int32_t gokd_attach_process(gokd_session_t s, uint32_t pid, uint32_t flags);
+
+/*
+ * Launch a new process under the debugger.
+ * flags: DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS, etc.
+ */
+int32_t gokd_create_process(gokd_session_t s, const char *cmd,
+                             uint32_t flags);
+
+/*
+ * Attach to a kernel target.
+ * options: "net:port=50000,key=..." or "com:port=\\\\.\\COM1,baud=115200"
+ */
+int32_t gokd_attach_kernel(gokd_session_t s, const char *options);
+
+/* Open a crash dump or minidump file for offline analysis. */
+int32_t gokd_open_dump(gokd_session_t s, const char *path);
+
+/* Detach from the current target. */
+int32_t gokd_detach(gokd_session_t s);
+
+/* ====================================================================== */
+/*  Execution control                                                     */
+/* ====================================================================== */
+
+/*
+ * Resume execution and wait for a stop event.
+ * Blocks until the target breaks (breakpoint, exception, exit).
+ * Fills *out with the stop reason and context.
+ */
+int32_t gokd_go(gokd_session_t s, gokd_stop_event_t *out);
+int32_t gokd_step_in(gokd_session_t s, gokd_stop_event_t *out);
+int32_t gokd_step_over(gokd_session_t s, gokd_stop_event_t *out);
+int32_t gokd_step_out(gokd_session_t s, gokd_stop_event_t *out);
+
+/*
+ * Asynchronous break-in. Safe to call from ANY thread.
+ * Causes WaitForEvent to return on the dispatch thread.
+ */
+int32_t gokd_break_in(gokd_session_t s);
+
+/* ====================================================================== */
+/*  Memory                                                                */
+/* ====================================================================== */
+
+int32_t gokd_read_virtual(gokd_session_t s, uint64_t addr,
+                           void *buf, size_t len, size_t *out_read);
+int32_t gokd_write_virtual(gokd_session_t s, uint64_t addr,
+                            const void *buf, size_t len);
+int32_t gokd_read_physical(gokd_session_t s, uint64_t addr,
+                            void *buf, size_t len, size_t *out_read);
+
+/* ====================================================================== */
+/*  Registers                                                             */
+/* ====================================================================== */
+
+/*
+ * Get all registers. Call with out=NULL to query count first.
+ * On entry *count = max slots in out. On exit *count = actual count.
+ */
+int32_t gokd_get_registers(gokd_session_t s,
+                            gokd_register_t *out, uint32_t *count);
+
+int32_t gokd_set_register(gokd_session_t s,
+                           const char *name, uint64_t value);
+
+/* ====================================================================== */
+/*  Stack                                                                 */
+/* ====================================================================== */
+
+/*
+ * Get the call stack. On entry *count = max frames. On exit *count =
+ * actual frame count.
+ */
+int32_t gokd_get_stack(gokd_session_t s,
+                        gokd_frame_t *out, uint32_t max, uint32_t *count);
+
+/* ====================================================================== */
+/*  Symbols                                                               */
+/* ====================================================================== */
+
+int32_t gokd_name_to_addr(gokd_session_t s,
+                           const char *name, uint64_t *addr);
+
+int32_t gokd_addr_to_name(gokd_session_t s, uint64_t addr,
+                           char *name, size_t name_len,
+                           uint64_t *displacement);
+
+int32_t gokd_set_symbol_path(gokd_session_t s, const char *path);
+int32_t gokd_get_symbol_path(gokd_session_t s, char *out, size_t len);
+
+/* ====================================================================== */
+/*  Types (via DbgHelp, resolved locally)                                 */
+/* ====================================================================== */
+
+int32_t gokd_get_type_size(gokd_session_t s,
+                            const char *module, const char *type_name,
+                            uint64_t *size);
+
+int32_t gokd_get_field_offset(gokd_session_t s,
+                               const char *module, const char *type_name,
+                               const char *field, uint32_t *offset);
+
+/*
+ * Get all fields of a type. Call with out=NULL to query count first.
+ * On entry *count = max slots in out. On exit *count = actual count.
+ */
+int32_t gokd_get_type_fields(gokd_session_t s,
+                              const char *module, const char *type_name,
+                              gokd_field_t *out, uint32_t max,
+                              uint32_t *count);
+
+/* ====================================================================== */
+/*  Modules                                                               */
+/* ====================================================================== */
+
+int32_t gokd_get_modules(gokd_session_t s,
+                          gokd_module_t *out, uint32_t max, uint32_t *count);
+
+/* ====================================================================== */
+/*  Threads                                                               */
+/* ====================================================================== */
+
+int32_t gokd_get_threads(gokd_session_t s,
+                          gokd_thread_t *out, uint32_t max, uint32_t *count);
+
+int32_t gokd_set_current_thread(gokd_session_t s, uint32_t sys_tid);
+
+/* ====================================================================== */
+/*  Breakpoints                                                           */
+/* ====================================================================== */
+
+int32_t gokd_add_breakpoint(gokd_session_t s,
+                             uint64_t addr, uint32_t *out_id);
+
+int32_t gokd_add_breakpoint_sym(gokd_session_t s,
+                                 const char *symbol, uint32_t *out_id);
+
+int32_t gokd_remove_breakpoint(gokd_session_t s, uint32_t id);
+
+int32_t gokd_enable_breakpoint(gokd_session_t s, uint32_t id, int enable);
+
+int32_t gokd_list_breakpoints(gokd_session_t s,
+                               gokd_bp_t *out, uint32_t max,
+                               uint32_t *count);
+
+/* ====================================================================== */
+/*  Disassembly                                                           */
+/* ====================================================================== */
+
+int32_t gokd_disassemble(gokd_session_t s, uint64_t addr,
+                          char *out, size_t len, uint64_t *next_addr);
+
+/* ====================================================================== */
+/*  Callbacks                                                             */
+/* ====================================================================== */
+
+void gokd_set_event_callback(gokd_session_t s, gokd_event_fn cb, void *ctx);
+void gokd_set_output_callback(gokd_session_t s, gokd_output_fn cb, void *ctx);
+
+/* ====================================================================== */
+/*  Escape hatch                                                          */
+/* ====================================================================== */
+
+/*
+ * Execute a raw DbgEng command (like the WinDbg command window).
+ * Captured output is written to out (UTF-8, null-terminated).
+ * Use sparingly — prefer the typed APIs above.
+ */
+int32_t gokd_execute(gokd_session_t s, const char *cmd,
+                      char *out, size_t out_len);
+
+#ifdef __cplusplus
+}
+#endif
