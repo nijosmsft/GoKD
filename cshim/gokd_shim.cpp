@@ -119,14 +119,11 @@ extern "C" int32_t gokd_create_process(gokd_session_t handle,
 extern "C" int32_t gokd_attach_kernel(gokd_session_t handle,
                                        const char *options) {
     S;
-    wchar_t *wopts = utf8_to_wide(options);
-    if (!wopts) return E_OUTOFMEMORY;
 
     s->control->AddEngineOptions(DEBUG_ENGOPT_INITIAL_BREAK);
 
-    HRESULT hr;
-    hr = s->client->AttachKernelWide(DEBUG_ATTACH_KERNEL_CONNECTION, wopts);
-    free(wopts);
+    HRESULT hr = s->client->AttachKernel(DEBUG_ATTACH_KERNEL_CONNECTION, options);
+    fprintf(stderr, "[gokd] AttachKernel('%s') returned 0x%08x\n", options, (unsigned)hr);
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
     /* Kernel attach can take a long time (waiting for target to break).
