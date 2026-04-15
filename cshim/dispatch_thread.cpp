@@ -13,64 +13,13 @@
  * happen on the same OS thread. No C-side threading is needed.
  */
 
-#include <windows.h>
 #include <objbase.h>
-
-/* Suppress macro collisions with names we use. */
-#undef CreateProcess
-
-#include <dbgeng.h>
-#include <dbghelp.h>
-
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
-#include <atomic>
+#include <cstdio>
 
-#include "gokd_shim.h"
+#include "gokd_internal.h"
 
-/* ====================================================================== */
-/*  Session state                                                         */
-/* ====================================================================== */
-
-struct gokd_session {
-    /* COM interfaces obtained via QueryInterface from the initial client. */
-    IDebugClient5      *client;
-    IDebugControl4     *control;
-    IDebugDataSpaces4  *data_spaces;
-    IDebugSymbols3     *symbols;
-    IDebugRegisters2   *registers;
-    IDebugSystemObjects4 *sys_objects;
-    IDebugAdvanced3    *advanced;
-
-    /* Callbacks (implemented in callbacks.cpp). */
-    IDebugEventCallbacksWide *event_cbs_impl;  /* our implementation */
-    IDebugOutputCallbacksWide *output_cbs_impl;
-
-    /* User-registered Go callbacks. */
-    gokd_event_fn  event_fn;
-    void          *event_ctx;
-    gokd_output_fn output_fn;
-    void          *output_ctx;
-
-    /* Last stop event captured by callbacks during WaitForEvent. */
-    gokd_stop_event_t last_stop;
-
-    /* Most recent HRESULT from a failed call. */
-    int32_t last_error;
-
-    /* Whether COM was initialised by us on this thread. */
-    int com_initialised;
-};
-
-/* ====================================================================== */
-/*  Forward declarations (callbacks.cpp)                                  */
-/* ====================================================================== */
-
-extern IDebugEventCallbacksWide *gokd_create_event_callbacks(gokd_session *s);
-extern IDebugOutputCallbacksWide *gokd_create_output_callbacks(gokd_session *s);
-extern void gokd_destroy_event_callbacks(IDebugEventCallbacksWide *cbs);
-extern void gokd_destroy_output_callbacks(IDebugOutputCallbacksWide *cbs);
 
 /* ====================================================================== */
 /*  Internal: UTF-8 ↔ UTF-16 conversion                                  */
@@ -133,9 +82,20 @@ extern "C" gokd_session_t gokd_create_session(void) {
         return 0;
     }
 
-    /* Create the IDebugClient via DebugCreate. */
-    hr = DebugCreate(__uuidof(IDebugClient5), (void **)&s->client);
+    /* Create the IDebugClient via DebugCreate.
+     * Request the base IDebugClient and then QI for v5. */
+    IDebugClient *base = NULL;
+    hr = DebugCreate(__uuidof(IDebugClient), (void **)&base);
+    fprintf(stderr, "[gokd] DebugCreate returned 0x%08x\n", (unsigned)hr);
     if (FAILED(hr)) {
+        if (s->com_initialised) CoUninitialize();
+        free(s);
+        return 0;
+    }
+    hr = base->QueryInterface(__uuidof(IDebugClient5), (void **)&s->client);
+    base->Release();
+    if (FAILED(hr)) {
+        fprintf(stderr, "[gokd] QI for IDebugClient5 failed: 0x%08x\n", (unsigned)hr);
         if (s->com_initialised) CoUninitialize();
         free(s);
         return 0;

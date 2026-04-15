@@ -4,9 +4,10 @@ package dbgcgo
 #include "gokd_shim.h"
 
 // Forward declarations for the Go callback trampolines.
+// Note: CGo exports do not support const qualifiers, so we use non-const here.
 extern void goEventCallback(gokd_session_t s, int event_type,
-                             const void *event_data, void *ctx);
-extern void goOutputCallback(uint32_t mask, const char *text, void *ctx);
+                             void *event_data, void *ctx);
+extern void goOutputCallback(uint32_t mask, char *text, void *ctx);
 */
 import "C"
 

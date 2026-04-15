@@ -10,25 +10,14 @@
  * WaitForEvent. The Go side routes them into channels.
  */
 
-#include <windows.h>
-#undef CreateProcess
-
-#include <dbgeng.h>
 #include <cstring>
 #include <cstdio>
+#include <new>
 
-#include "gokd_shim.h"
+#include "gokd_internal.h"
 
-/* Forward declaration from dispatch_thread.cpp. */
-struct gokd_session;
-extern gokd_session *gokd_get_session(gokd_session_t handle);
-
-/* Helper to get session from callback context. */
 #define SESSION_FROM_THIS \
     gokd_session *sess = (gokd_session *)m_session;
-
-/* Utility: copy a wide string safely into a fixed UTF-8 buffer. */
-extern void wide_to_utf8_fixed(const wchar_t *wide, char *out, size_t out_size);
 
 /* ====================================================================== */
 /*  GokdEventCallbacks                                                    */
@@ -38,6 +27,7 @@ class GokdEventCallbacks : public IDebugEventCallbacksWide {
 public:
     GokdEventCallbacks(gokd_session *session)
         : m_session(session), m_refcount(1) {}
+    virtual ~GokdEventCallbacks() {}
 
     /* IUnknown */
     STDMETHOD_(ULONG, AddRef)() { return ++m_refcount; }
@@ -272,6 +262,7 @@ class GokdOutputCallbacks : public IDebugOutputCallbacksWide {
 public:
     GokdOutputCallbacks(gokd_session *session)
         : m_session(session), m_refcount(1) {}
+    virtual ~GokdOutputCallbacks() {}
 
     /* IUnknown */
     STDMETHOD_(ULONG, AddRef)() { return ++m_refcount; }
@@ -320,8 +311,6 @@ private:
 /*  Factory functions (called from dispatch_thread.cpp)                   */
 /* ====================================================================== */
 
-extern "C" {
-
 IDebugEventCallbacksWide *gokd_create_event_callbacks(gokd_session *s) {
     return new (std::nothrow) GokdEventCallbacks(s);
 }
@@ -337,5 +326,3 @@ void gokd_destroy_event_callbacks(IDebugEventCallbacksWide *cbs) {
 void gokd_destroy_output_callbacks(IDebugOutputCallbacksWide *cbs) {
     if (cbs) cbs->Release();
 }
-
-} /* extern "C" */

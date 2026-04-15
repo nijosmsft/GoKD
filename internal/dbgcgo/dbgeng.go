@@ -11,7 +11,7 @@ package dbgcgo
 /*
 #cgo CFLAGS:  -I${SRCDIR}/../../cshim
 #cgo LDFLAGS: -L${SRCDIR}/../../cshim/lib -lgokd_shim
-#cgo LDFLAGS: -ldbgeng -ldbghelp -lole32 -luuid
+#cgo LDFLAGS: -ldbgeng -ldbghelp -lole32 -luuid -lstdc++
 
 #include "gokd_shim.h"
 #include <stdlib.h>

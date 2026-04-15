@@ -10,27 +10,11 @@
  * explicitly thread-safe.
  */
 
-#include <windows.h>
-#undef CreateProcess
-
-#include <dbgeng.h>
-#include <dbghelp.h>
-
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
 
-#include "gokd_shim.h"
-
-/* ====================================================================== */
-/*  Internal: session access and string helpers                           */
-/* ====================================================================== */
-
-struct gokd_session;
-extern gokd_session *gokd_get_session(gokd_session_t handle);
-extern wchar_t *utf8_to_wide(const char *utf8);
-extern void wide_to_utf8_fixed(const wchar_t *wide, char *out, size_t out_size);
-extern int wide_to_utf8(const wchar_t *wide, char *out, size_t out_len);
+#include "gokd_internal.h"
 
 /* Access the session's COM interfaces. */
 #define S gokd_session *s = gokd_get_session(handle); \
@@ -38,10 +22,12 @@ extern int wide_to_utf8(const wchar_t *wide, char *out, size_t out_len);
 
 #define SET_LAST_ERROR(hr) do { if (FAILED(hr)) s->last_error = hr; } while(0)
 
-/* SEH wrapper: catch access violations from DbgEng. */
-#define SEH_BEGIN __try {
-#define SEH_END(hr_var) } __except(EXCEPTION_EXECUTE_HANDLER) { \
-    hr_var = (HRESULT)GetExceptionCode(); }
+/*
+ * Note: SEH (__try/__except) is MSVC-specific and not available in
+ * MinGW g++. DbgEng internally handles most exceptions via its own
+ * SEH handlers in WaitForEvent. If MSVC builds are needed later,
+ * SEH wrappers can be re-added.
+ */
 
 /* ====================================================================== */
 /*  Attach modes                                                          */
@@ -51,15 +37,32 @@ extern "C" int32_t gokd_attach_process(gokd_session_t handle,
                                         uint32_t pid, uint32_t flags) {
     S;
     HRESULT hr;
-    SEH_BEGIN
-        hr = s->client->AttachProcess(0, pid, flags);
-    SEH_END(hr)
+
+    hr = s->client->AttachProcess(0, pid, flags);
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    /* Wait for the initial break-in event. */
-    SEH_BEGIN
-        hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, INFINITE);
-    SEH_END(hr)
+    /*
+     * Wait for the initial break-in event. DbgEng needs to process
+     * at least one event after AttachProcess to complete the attach.
+     * We try WaitForEvent in a loop with short timeouts and use
+     * SetInterrupt to request a break-in.
+     */
+    s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
+
+    for (int attempt = 0; attempt < 10; attempt++) {
+        hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, 1000);
+        if (hr == S_OK) break;  /* event processed */
+        /* If timeout (S_FALSE) or error, try again with SetInterrupt */
+        s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
+    }
+
+    /* Check if we're actually in a broken state now. */
+    ULONG exec_status = 0;
+    s->control->GetExecutionStatus(&exec_status);
+    if (exec_status == DEBUG_STATUS_BREAK) {
+        return S_OK;
+    }
+
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -71,15 +74,50 @@ extern "C" int32_t gokd_create_process(gokd_session_t handle,
     if (!wcmd) return E_OUTOFMEMORY;
 
     HRESULT hr;
-    SEH_BEGIN
-        hr = s->client->CreateProcessWide(0, wcmd, flags);
-    SEH_END(hr)
     free(wcmd);
+
+    /* Use the ANSI version with the base IDebugClient interface. */
+    char cmd_copy[4096];
+    strncpy(cmd_copy, cmd, sizeof(cmd_copy) - 1);
+    cmd_copy[sizeof(cmd_copy) - 1] = '\0';
+
+    fprintf(stderr, "[gokd] CreateProcessAndAttach cmd='%s'\n", cmd);
+
+    /* Cast to IDebugClient (base) to use the non-Wide API. */
+    IDebugClient *base_client = NULL;
+    hr = s->client->QueryInterface(__uuidof(IDebugClient), (void**)&base_client);
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    SEH_BEGIN
-        hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, INFINITE);
-    SEH_END(hr)
+    hr = base_client->CreateProcessAndAttach(
+        0,                         /* Server */
+        cmd_copy,                  /* CommandLine (PSTR, mutable) */
+        DEBUG_ONLY_THIS_PROCESS,   /* CreateFlags */
+        0,                         /* ProcessId */
+        DEBUG_ATTACH_DEFAULT       /* AttachFlags */
+    );
+    fprintf(stderr, "[gokd] CreateProcessAndAttach returned 0x%08x\n", (unsigned)hr);
+    base_client->Release();
+    if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
+
+    /* Process initial events to reach the initial breakpoint. */
+    fprintf(stderr, "[gokd] Calling WaitForEvent...\n");
+    hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, 30000);
+    fprintf(stderr, "[gokd] WaitForEvent returned 0x%08x\n", (unsigned)hr);
+
+    ULONG exec_status = 0;
+    s->control->GetExecutionStatus(&exec_status);
+    fprintf(stderr, "[gokd] exec status = %lu\n", exec_status);
+
+    /* If the first WaitForEvent timed out, check if engine needs
+     * initial break. */
+    if (hr != S_OK && exec_status != DEBUG_STATUS_BREAK) {
+        s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
+        hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, 5000);
+        fprintf(stderr, "[gokd] retry WaitForEvent returned 0x%08x\n", (unsigned)hr);
+        s->control->GetExecutionStatus(&exec_status);
+        fprintf(stderr, "[gokd] retry exec status = %lu\n", exec_status);
+    }
+
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -91,15 +129,13 @@ extern "C" int32_t gokd_attach_kernel(gokd_session_t handle,
     if (!wopts) return E_OUTOFMEMORY;
 
     HRESULT hr;
-    SEH_BEGIN
-        hr = s->client->AttachKernelWide(DEBUG_ATTACH_KERNEL_CONNECTION, wopts);
-    SEH_END(hr)
+    hr = s->client->AttachKernelWide(DEBUG_ATTACH_KERNEL_CONNECTION, wopts);
+
     free(wopts);
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    SEH_BEGIN
-        hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, INFINITE);
-    SEH_END(hr)
+    hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, INFINITE);
+
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -110,15 +146,13 @@ extern "C" int32_t gokd_open_dump(gokd_session_t handle, const char *path) {
     if (!wpath) return E_OUTOFMEMORY;
 
     HRESULT hr;
-    SEH_BEGIN
-        hr = s->client->OpenDumpFileWide(wpath, 0);
-    SEH_END(hr)
+    hr = s->client->OpenDumpFileWide(wpath, 0);
+
     free(wpath);
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    SEH_BEGIN
-        hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, INFINITE);
-    SEH_END(hr)
+    hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, 30000);
+
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -126,9 +160,9 @@ extern "C" int32_t gokd_open_dump(gokd_session_t handle, const char *path) {
 extern "C" int32_t gokd_detach(gokd_session_t handle) {
     S;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->client->DetachProcesses();
-    SEH_END(hr)
+
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -142,14 +176,14 @@ static int32_t execute_and_wait(gokd_session *s, ULONG status,
     memset(&s->last_stop, 0, sizeof(s->last_stop));
 
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->control->SetExecutionStatus(status);
-    SEH_END(hr)
+
     if (FAILED(hr)) { s->last_error = hr; return hr; }
 
-    SEH_BEGIN
+    
         hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, INFINITE);
-    SEH_END(hr)
+
     if (FAILED(hr)) { s->last_error = hr; return hr; }
 
     /*
@@ -165,11 +199,7 @@ static int32_t execute_and_wait(gokd_session *s, ULONG status,
         }
         /* Retrieve the current instruction pointer. */
         if (s->registers) {
-            ULONG ip_index;
-            if (SUCCEEDED(s->registers->GetInstructionOffset(
-                    &s->last_stop.address))) {
-                /* ok */
-            }
+            s->registers->GetInstructionOffset(&s->last_stop.address);
         }
         if (s->sys_objects) {
             ULONG tid = 0;
@@ -206,15 +236,15 @@ extern "C" int32_t gokd_step_out(gokd_session_t handle,
     HRESULT hr;
     memset(&s->last_stop, 0, sizeof(s->last_stop));
 
-    SEH_BEGIN
+    
         hr = s->control->Execute(DEBUG_OUTCTL_ALL_CLIENTS, "gu",
                                   DEBUG_EXECUTE_NOT_LOGGED);
-    SEH_END(hr)
+
     if (FAILED(hr)) { s->last_error = hr; return hr; }
 
-    SEH_BEGIN
+    
         hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, INFINITE);
-    SEH_END(hr)
+
     if (FAILED(hr)) { s->last_error = hr; return hr; }
 
     if (s->last_stop.reason == 0) {
@@ -248,9 +278,9 @@ extern "C" int32_t gokd_read_virtual(gokd_session_t handle, uint64_t addr,
     S;
     ULONG bytes_read = 0;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->data_spaces->ReadVirtual(addr, buf, (ULONG)len, &bytes_read);
-    SEH_END(hr)
+
     if (out_read) *out_read = bytes_read;
     SET_LAST_ERROR(hr);
     return hr;
@@ -261,10 +291,10 @@ extern "C" int32_t gokd_write_virtual(gokd_session_t handle, uint64_t addr,
     S;
     ULONG bytes_written = 0;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->data_spaces->WriteVirtual(addr, (PVOID)buf, (ULONG)len,
                                            &bytes_written);
-    SEH_END(hr)
+
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -275,9 +305,9 @@ extern "C" int32_t gokd_read_physical(gokd_session_t handle, uint64_t addr,
     S;
     ULONG bytes_read = 0;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->data_spaces->ReadPhysical(addr, buf, (ULONG)len, &bytes_read);
-    SEH_END(hr)
+
     if (out_read) *out_read = bytes_read;
     SET_LAST_ERROR(hr);
     return hr;
@@ -294,9 +324,9 @@ extern "C" int32_t gokd_get_registers(gokd_session_t handle,
     ULONG num_regs = 0;
     HRESULT hr;
 
-    SEH_BEGIN
+    
         hr = s->registers->GetNumberRegisters(&num_regs);
-    SEH_END(hr)
+
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
     /* If out is NULL, just return the count. */
@@ -315,19 +345,19 @@ extern "C" int32_t gokd_get_registers(gokd_session_t handle,
         wchar_t name_buf[64] = {};
         ULONG name_len = 0;
         DEBUG_REGISTER_DESCRIPTION desc = {};
-        SEH_BEGIN
+        
             hr = s->registers->GetDescriptionWide(i, name_buf,
                     sizeof(name_buf)/sizeof(name_buf[0]), &name_len, &desc);
-        SEH_END(hr)
+    
         if (SUCCEEDED(hr)) {
             wide_to_utf8_fixed(name_buf, out[i].name, sizeof(out[i].name));
         }
 
         /* Get register value. */
         DEBUG_VALUE val = {};
-        SEH_BEGIN
+        
             hr = s->registers->GetValue(i, &val);
-        SEH_END(hr)
+    
         if (SUCCEEDED(hr)) {
             out[i].valid = 1;
             /* Map DEBUG_VALUE_* type to our register type. */
@@ -385,9 +415,9 @@ extern "C" int32_t gokd_set_register(gokd_session_t handle,
     /* Find the register index by name. */
     ULONG num_regs = 0;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->registers->GetNumberRegisters(&num_regs);
-    SEH_END(hr)
+
     if (FAILED(hr)) { free(wname); SET_LAST_ERROR(hr); return hr; }
 
     ULONG target_idx = (ULONG)-1;
@@ -408,9 +438,9 @@ extern "C" int32_t gokd_set_register(gokd_session_t handle,
     DEBUG_VALUE val = {};
     val.Type = DEBUG_VALUE_INT64;
     val.I64 = value;
-    SEH_BEGIN
+    
         hr = s->registers->SetValue(target_idx, &val);
-    SEH_END(hr)
+
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -432,9 +462,9 @@ extern "C" int32_t gokd_get_stack(gokd_session_t handle,
 
     ULONG filled = 0;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->control->GetStackTrace(0, 0, 0, frames, max, &filled);
-    SEH_END(hr)
+
     if (FAILED(hr)) {
         free(frames);
         SET_LAST_ERROR(hr);
@@ -452,11 +482,10 @@ extern "C" int32_t gokd_get_stack(gokd_session_t handle,
         wchar_t sym_buf[512] = {};
         ULONG64 displacement = 0;
         HRESULT shr;
-        SEH_BEGIN
+        
             shr = s->symbols->GetNameByOffsetWide(
                 frames[i].InstructionOffset, sym_buf,
                 sizeof(sym_buf)/sizeof(sym_buf[0]), NULL, &displacement);
-        SEH_END(shr)
         if (SUCCEEDED(shr)) {
             /* Split "module!function" into separate fields. */
             wchar_t *bang = wcschr(sym_buf, L'!');
@@ -476,11 +505,10 @@ extern "C" int32_t gokd_get_stack(gokd_session_t handle,
         /* Try to get source line info. */
         wchar_t src_buf[512] = {};
         ULONG line = 0;
-        SEH_BEGIN
+        
             shr = s->symbols->GetLineByOffsetWide(
                 frames[i].InstructionOffset, &line, src_buf,
                 sizeof(src_buf)/sizeof(src_buf[0]), NULL, NULL);
-        SEH_END(shr)
         if (SUCCEEDED(shr)) {
             wide_to_utf8_fixed(src_buf, out[i].source_file,
                                sizeof(out[i].source_file));
@@ -507,9 +535,9 @@ extern "C" int32_t gokd_name_to_addr(gokd_session_t handle,
 
     ULONG64 offset = 0;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->symbols->GetOffsetByNameWide(wname, &offset);
-    SEH_END(hr)
+
     free(wname);
     *addr = offset;
     SET_LAST_ERROR(hr);
@@ -523,10 +551,10 @@ extern "C" int32_t gokd_addr_to_name(gokd_session_t handle, uint64_t addr,
     wchar_t buf[1024] = {};
     ULONG64 disp = 0;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->symbols->GetNameByOffsetWide(addr, buf,
                 sizeof(buf)/sizeof(buf[0]), NULL, &disp);
-    SEH_END(hr)
+
     if (SUCCEEDED(hr)) {
         wide_to_utf8_fixed(buf, name, name_len);
         if (displacement) *displacement = disp;
@@ -541,9 +569,9 @@ extern "C" int32_t gokd_set_symbol_path(gokd_session_t handle,
     wchar_t *wpath = utf8_to_wide(path);
     if (!wpath) return E_OUTOFMEMORY;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->symbols->SetSymbolPathWide(wpath);
-    SEH_END(hr)
+
     free(wpath);
     SET_LAST_ERROR(hr);
     return hr;
@@ -554,10 +582,10 @@ extern "C" int32_t gokd_get_symbol_path(gokd_session_t handle,
     S;
     wchar_t buf[2048] = {};
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->symbols->GetSymbolPathWide(buf,
                 sizeof(buf)/sizeof(buf[0]), NULL);
-    SEH_END(hr)
+
     if (SUCCEEDED(hr)) {
         wide_to_utf8_fixed(buf, out, len);
     }
@@ -584,24 +612,24 @@ extern "C" int32_t gokd_get_type_size(gokd_session_t handle,
     ULONG64 mod_base = 0;
     ULONG mod_index = 0;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->symbols->GetModuleByModuleNameWide(wmod, 0, &mod_index,
                                                     &mod_base);
-    SEH_END(hr)
+
     if (FAILED(hr)) { free(wmod); free(wtype); SET_LAST_ERROR(hr); return hr; }
 
     /* Get the type ID. */
     ULONG type_id = 0;
-    SEH_BEGIN
+    
         hr = s->symbols->GetTypeIdWide(mod_base, wtype, &type_id);
-    SEH_END(hr)
+
     if (FAILED(hr)) { free(wmod); free(wtype); SET_LAST_ERROR(hr); return hr; }
 
     /* Get the type size. */
     ULONG type_size = 0;
-    SEH_BEGIN
+    
         hr = s->symbols->GetTypeSize(mod_base, type_id, &type_size);
-    SEH_END(hr)
+
     *size = type_size;
 
     free(wmod);
@@ -628,24 +656,18 @@ extern "C" int32_t gokd_get_field_offset(gokd_session_t handle,
 
     ULONG64 mod_base = 0;
     ULONG mod_index = 0;
-    HRESULT hr;
-    SEH_BEGIN
-        hr = s->symbols->GetModuleByModuleNameWide(wmod, 0, &mod_index,
-                                                    &mod_base);
-    SEH_END(hr)
-    if (FAILED(hr)) goto done;
-
     ULONG type_id = 0;
-    SEH_BEGIN
-        hr = s->symbols->GetTypeIdWide(mod_base, wtype, &type_id);
-    SEH_END(hr)
+    ULONG field_offset = 0;
+    HRESULT hr;
+
+    hr = s->symbols->GetModuleByModuleNameWide(wmod, 0, &mod_index, &mod_base);
     if (FAILED(hr)) goto done;
 
-    ULONG field_offset = 0;
-    SEH_BEGIN
-        hr = s->symbols->GetFieldOffsetWide(mod_base, type_id, wfield,
-                                             &field_offset);
-    SEH_END(hr)
+    hr = s->symbols->GetTypeIdWide(mod_base, wtype, &type_id);
+    if (FAILED(hr)) goto done;
+
+    hr = s->symbols->GetFieldOffsetWide(mod_base, type_id, wfield,
+                                         &field_offset);
     *offset = field_offset;
 
 done:
@@ -680,16 +702,16 @@ extern "C" int32_t gokd_get_type_fields(gokd_session_t handle,
     ULONG64 mod_base = 0;
     ULONG mod_index = 0;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->symbols->GetModuleByModuleNameWide(wmod, 0, &mod_index,
                                                     &mod_base);
-    SEH_END(hr)
+
     if (FAILED(hr)) { free(wmod); free(wtype); SET_LAST_ERROR(hr); return hr; }
 
     ULONG type_id = 0;
-    SEH_BEGIN
+    
         hr = s->symbols->GetTypeIdWide(mod_base, wtype, &type_id);
-    SEH_END(hr)
+
     if (FAILED(hr)) { free(wmod); free(wtype); SET_LAST_ERROR(hr); return hr; }
 
     /*
@@ -697,9 +719,9 @@ extern "C" int32_t gokd_get_type_fields(gokd_session_t handle,
      * We call through the DbgEng process handle.
      */
     ULONG64 process_handle = 0;
-    SEH_BEGIN
+    
         hr = s->sys_objects->GetCurrentProcessHandle(&process_handle);
-    SEH_END(hr)
+
     if (FAILED(hr)) { free(wmod); free(wtype); SET_LAST_ERROR(hr); return hr; }
 
     DWORD child_count = 0;
@@ -799,9 +821,9 @@ extern "C" int32_t gokd_get_modules(gokd_session_t handle,
     S;
     ULONG loaded = 0, unloaded = 0;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->symbols->GetNumberModules(&loaded, &unloaded);
-    SEH_END(hr)
+
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
     if (!out) {
@@ -814,17 +836,17 @@ extern "C" int32_t gokd_get_modules(gokd_session_t handle,
         memset(&out[i], 0, sizeof(gokd_module_t));
 
         ULONG64 base = 0;
-        SEH_BEGIN
+        
             hr = s->symbols->GetModuleByIndex(i, &base);
-        SEH_END(hr)
+    
         if (FAILED(hr)) continue;
         out[i].base = base;
 
         /* Get module parameters. */
         DEBUG_MODULE_PARAMETERS params = {};
-        SEH_BEGIN
+        
             hr = s->symbols->GetModuleParameters(1, &base, 0, &params);
-        SEH_END(hr)
+    
         if (SUCCEEDED(hr)) {
             out[i].size = params.Size;
             out[i].timestamp = params.TimeDateStamp;
@@ -834,14 +856,14 @@ extern "C" int32_t gokd_get_modules(gokd_session_t handle,
         /* Get module name. */
         wchar_t name_buf[256] = {};
         wchar_t image_buf[512] = {};
-        SEH_BEGIN
+        
             s->symbols->GetModuleNameStringWide(
                 DEBUG_MODNAME_MODULE, i, base,
                 name_buf, sizeof(name_buf)/sizeof(name_buf[0]), NULL);
             s->symbols->GetModuleNameStringWide(
                 DEBUG_MODNAME_IMAGE, i, base,
                 image_buf, sizeof(image_buf)/sizeof(image_buf[0]), NULL);
-        SEH_END(hr)
+    
         wide_to_utf8_fixed(name_buf, out[i].name, sizeof(out[i].name));
         wide_to_utf8_fixed(image_buf, out[i].image_name,
                            sizeof(out[i].image_name));
@@ -861,9 +883,9 @@ extern "C" int32_t gokd_get_threads(gokd_session_t handle,
     S;
     ULONG total = 0;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->sys_objects->GetNumberThreads(&total);
-    SEH_END(hr)
+
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
     if (!out) {
@@ -878,9 +900,9 @@ extern "C" int32_t gokd_get_threads(gokd_session_t handle,
     ULONG *sys_ids = (ULONG *)calloc(total, sizeof(ULONG));
     if (!ids || !sys_ids) { free(ids); free(sys_ids); return E_OUTOFMEMORY; }
 
-    SEH_BEGIN
+    
         hr = s->sys_objects->GetThreadIdsByIndex(0, total, ids, sys_ids);
-    SEH_END(hr)
+
     if (FAILED(hr)) {
         free(ids); free(sys_ids);
         SET_LAST_ERROR(hr);
@@ -906,8 +928,8 @@ extern "C" int32_t gokd_get_threads(gokd_session_t handle,
             out[i].data_offset = teb;
 
             ULONG64 start = 0;
-            s->sys_objects->GetCurrentThreadSystemId(
-                (PULONG)&out[i].system_id);
+            s->sys_objects->GetCurrentThreadTeb(&start);
+            out[i].start_offset = start;
         }
     }
 
@@ -926,14 +948,14 @@ extern "C" int32_t gokd_set_current_thread(gokd_session_t handle,
     /* Find the engine thread ID from the system thread ID. */
     ULONG engine_id = 0;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->sys_objects->GetThreadIdBySystemId(sys_tid, &engine_id);
-    SEH_END(hr)
+
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    SEH_BEGIN
+    
         hr = s->sys_objects->SetCurrentThreadId(engine_id);
-    SEH_END(hr)
+
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -947,20 +969,20 @@ extern "C" int32_t gokd_add_breakpoint(gokd_session_t handle,
     S;
     IDebugBreakpoint2 *bp = NULL;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->control->AddBreakpoint2(DEBUG_BREAKPOINT_CODE, DEBUG_ANY_ID,
                                          &bp);
-    SEH_END(hr)
+
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    SEH_BEGIN
+    
         hr = bp->SetOffset(addr);
-    SEH_END(hr)
+
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    SEH_BEGIN
+    
         bp->AddFlags(DEBUG_BREAKPOINT_ENABLED);
-    SEH_END(hr)
+
 
     ULONG id = 0;
     bp->GetId(&id);
@@ -977,21 +999,21 @@ extern "C" int32_t gokd_add_breakpoint_sym(gokd_session_t handle,
 
     IDebugBreakpoint2 *bp = NULL;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->control->AddBreakpoint2(DEBUG_BREAKPOINT_CODE, DEBUG_ANY_ID,
                                          &bp);
-    SEH_END(hr)
+
     if (FAILED(hr)) { free(wsym); SET_LAST_ERROR(hr); return hr; }
 
-    SEH_BEGIN
+    
         hr = bp->SetOffsetExpressionWide(wsym);
-    SEH_END(hr)
+
     free(wsym);
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    SEH_BEGIN
+    
         bp->AddFlags(DEBUG_BREAKPOINT_ENABLED);
-    SEH_END(hr)
+
 
     ULONG id = 0;
     bp->GetId(&id);
@@ -1004,14 +1026,14 @@ extern "C" int32_t gokd_remove_breakpoint(gokd_session_t handle,
     S;
     IDebugBreakpoint2 *bp = NULL;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->control->GetBreakpointById2(id, &bp);
-    SEH_END(hr)
+
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    SEH_BEGIN
+    
         hr = s->control->RemoveBreakpoint2(bp);
-    SEH_END(hr)
+
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -1021,17 +1043,17 @@ extern "C" int32_t gokd_enable_breakpoint(gokd_session_t handle,
     S;
     IDebugBreakpoint2 *bp = NULL;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->control->GetBreakpointById2(id, &bp);
-    SEH_END(hr)
+
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    SEH_BEGIN
+    
         if (enable)
             hr = bp->AddFlags(DEBUG_BREAKPOINT_ENABLED);
         else
             hr = bp->RemoveFlags(DEBUG_BREAKPOINT_ENABLED);
-    SEH_END(hr)
+
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -1042,9 +1064,9 @@ extern "C" int32_t gokd_list_breakpoints(gokd_session_t handle,
     S;
     ULONG num_bps = 0;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->control->GetNumberBreakpoints(&num_bps);
-    SEH_END(hr)
+
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
     if (!out) {
@@ -1057,9 +1079,9 @@ extern "C" int32_t gokd_list_breakpoints(gokd_session_t handle,
         memset(&out[i], 0, sizeof(gokd_bp_t));
 
         IDebugBreakpoint2 *bp = NULL;
-        SEH_BEGIN
+        
             hr = s->control->GetBreakpointByIndex2(i, &bp);
-        SEH_END(hr)
+    
         if (FAILED(hr) || !bp) continue;
 
         ULONG id = 0;
@@ -1097,10 +1119,10 @@ extern "C" int32_t gokd_disassemble(gokd_session_t handle, uint64_t addr,
     wchar_t buf[1024] = {};
     ULONG64 end_offset = 0;
     HRESULT hr;
-    SEH_BEGIN
+    
         hr = s->control->DisassembleWide(
             addr, 0, buf, sizeof(buf)/sizeof(buf[0]), NULL, &end_offset);
-    SEH_END(hr)
+
     if (SUCCEEDED(hr)) {
         wide_to_utf8_fixed(buf, out, len);
         if (next_addr) *next_addr = end_offset;
@@ -1155,20 +1177,20 @@ extern "C" int32_t gokd_execute(gokd_session_t handle, const char *cmd,
         /* Use OutputWide with a capture mechanism. For simplicity,
          * execute with OUTCTL to capture to our output callback,
          * then the Go side reads from the output channel. */
-        SEH_BEGIN
+        
             hr = s->control->ExecuteWide(
                 DEBUG_OUTCTL_ALL_CLIENTS, wcmd, DEBUG_EXECUTE_DEFAULT);
-        SEH_END(hr)
+    
 
         /* For captured output, we'd need the output callback to accumulate
          * into a buffer. For now, this sends output through the output
          * callback and the Go side collects it via the Output() channel.
          * The `out` parameter will contain a note about this. */
     } else {
-        SEH_BEGIN
+        
             hr = s->control->ExecuteWide(
                 DEBUG_OUTCTL_ALL_CLIENTS, wcmd, DEBUG_EXECUTE_DEFAULT);
-        SEH_END(hr)
+    
     }
 
     free(wcmd);
