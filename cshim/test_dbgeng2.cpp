@@ -12,6 +12,7 @@ int main() {
 
     /* Try loading WinDbg's dbgeng.dll explicitly. */
     const char *paths[] = {
+        "C:\\Program Files (x86)\\Windows Kits\\10\\Debuggers\\x64\\dbgeng.dll",
         "C:\\Program Files\\WindowsApps\\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\\amd64\\dbgeng.dll",
         NULL
     };

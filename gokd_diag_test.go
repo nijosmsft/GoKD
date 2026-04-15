@@ -21,7 +21,18 @@ func TestCreateProcessAndInspect(t *testing.T) {
 	}
 	defer sess.Detach()
 
-	t.Log("Process created, now reading modules...")
+	// Try basic thread enumeration to check if we have a valid target.
+	threads, terr := sess.Threads()
+	t.Logf("Threads() err=%v count=%d", terr, len(threads))
+
+	t.Log("Process created, trying Execute('lm')...")
+	out, err := sess.Execute("lm")
+	t.Logf("Execute('lm') err=%v out=%q", err, out)
+
+	out2, err2 := sess.Execute(".effmach")
+	t.Logf("Execute('.effmach') err=%v out=%q", err2, out2)
+
+	t.Log("Now reading modules...")
 	mods, err := sess.Modules()
 	if err != nil {
 		t.Fatalf("Modules() failed: %v", err)
@@ -56,7 +67,7 @@ func TestCreateProcessAndInspect(t *testing.T) {
 	}
 
 	t.Log("Reading threads...")
-	threads, err := sess.Threads()
+	threads, err = sess.Threads()
 	if err != nil {
 		t.Fatalf("Threads() failed: %v", err)
 	}

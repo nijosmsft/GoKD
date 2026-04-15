@@ -82,12 +82,73 @@ extern "C" gokd_session_t gokd_create_session(void) {
         return 0;
     }
 
-    /* Create the IDebugClient via DebugCreate.
-     * Request the base IDebugClient and then QI for v5. */
+    /*
+     * Load dbgeng.dll dynamically. On Windows 11, the system dbgeng.dll
+     * (C:\Windows\System32\dbgeng.dll) is a Known DLL that doesn't
+     * support active debugging via the COM API. The full version ships
+     * with the Debugging Tools for Windows (Windows SDK).
+     *
+     * We search for the SDK version first:
+     *   1. GOKD_DBGENG_PATH environment variable (explicit override)
+     *   2. Debugging Tools for Windows in the Windows SDK
+     *   3. System dbgeng.dll (fallback)
+     */
+    typedef HRESULT (STDAPICALLTYPE *PFN_DebugCreate)(REFIID, PVOID*);
+    HMODULE hDbgEng = NULL;
+    PFN_DebugCreate pfnDebugCreate = NULL;
+
+    /* Try env var first. */
+    char env_path[512] = {};
+    if (GetEnvironmentVariableA("GOKD_DBGENG_PATH", env_path, sizeof(env_path)) > 0) {
+        hDbgEng = LoadLibraryA(env_path);
+    }
+
+    /* Try SDK Debugging Tools for Windows. */
+    if (!hDbgEng) {
+        static const char *sdk_paths[] = {
+            "C:\\Program Files (x86)\\Windows Kits\\10\\Debuggers\\x64\\dbgeng.dll",
+            "C:\\Program Files\\Windows Kits\\10\\Debuggers\\x64\\dbgeng.dll",
+            NULL
+        };
+        for (int i = 0; sdk_paths[i]; i++) {
+            hDbgEng = LoadLibraryA(sdk_paths[i]);
+            if (hDbgEng) break;
+        }
+    }
+
+    /* Fallback to system dbgeng.dll. */
+    if (!hDbgEng) {
+        hDbgEng = LoadLibraryA("dbgeng.dll");
+    }
+
+    if (!hDbgEng) {
+        fprintf(stderr, "[gokd] failed to load dbgeng.dll\n");
+        if (s->com_initialised) CoUninitialize();
+        free(s);
+        return 0;
+    }
+
+    pfnDebugCreate = (PFN_DebugCreate)GetProcAddress(hDbgEng, "DebugCreate");
+    if (!pfnDebugCreate) {
+        fprintf(stderr, "[gokd] DebugCreate not found in dbgeng.dll\n");
+        FreeLibrary(hDbgEng);
+        if (s->com_initialised) CoUninitialize();
+        free(s);
+        return 0;
+    }
+
+    {
+        char dll_path[512] = {};
+        GetModuleFileNameA(hDbgEng, dll_path, sizeof(dll_path));
+        fprintf(stderr, "[gokd] loaded dbgeng.dll from: %s\n", dll_path);
+    }
+
+    /* Create the IDebugClient via DebugCreate. */
     IDebugClient *base = NULL;
-    hr = DebugCreate(__uuidof(IDebugClient), (void **)&base);
-    fprintf(stderr, "[gokd] DebugCreate returned 0x%08x\n", (unsigned)hr);
+    hr = pfnDebugCreate(__uuidof(IDebugClient), (void **)&base);
     if (FAILED(hr)) {
+        fprintf(stderr, "[gokd] DebugCreate failed: 0x%08x\n", (unsigned)hr);
+        FreeLibrary(hDbgEng);
         if (s->com_initialised) CoUninitialize();
         free(s);
         return 0;
@@ -96,6 +157,7 @@ extern "C" gokd_session_t gokd_create_session(void) {
     base->Release();
     if (FAILED(hr)) {
         fprintf(stderr, "[gokd] QI for IDebugClient5 failed: 0x%08x\n", (unsigned)hr);
+        FreeLibrary(hDbgEng);
         if (s->com_initialised) CoUninitialize();
         free(s);
         return 0;

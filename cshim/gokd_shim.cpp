@@ -42,26 +42,31 @@ extern "C" int32_t gokd_attach_process(gokd_session_t handle,
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
     /*
-     * Wait for the initial break-in event. DbgEng needs to process
-     * at least one event after AttachProcess to complete the attach.
-     * We try WaitForEvent in a loop with short timeouts and use
-     * SetInterrupt to request a break-in.
+     * Process initial events until the target is broken in.
+     * DbgEng may need multiple WaitForEvent calls to process
+     * all pending events (process create, module loads, etc.).
      */
     s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
 
-    for (int attempt = 0; attempt < 10; attempt++) {
-        hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, 1000);
-        if (hr == S_OK) break;  /* event processed */
-        /* If timeout (S_FALSE) or error, try again with SetInterrupt */
-        s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
+    for (int attempt = 0; attempt < 20; attempt++) {
+        hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, 500);
+
+        ULONG exec_status = 0;
+        s->control->GetExecutionStatus(&exec_status);
+        if (exec_status == DEBUG_STATUS_BREAK)
+            return S_OK;
+
+        /* If still running, keep processing events. */
+        if (exec_status == DEBUG_STATUS_NO_DEBUGGEE) {
+            s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
+        }
     }
 
-    /* Check if we're actually in a broken state now. */
+    /* Check final state. */
     ULONG exec_status = 0;
     s->control->GetExecutionStatus(&exec_status);
-    if (exec_status == DEBUG_STATUS_BREAK) {
+    if (exec_status == DEBUG_STATUS_BREAK)
         return S_OK;
-    }
 
     SET_LAST_ERROR(hr);
     return hr;
@@ -70,53 +75,31 @@ extern "C" int32_t gokd_attach_process(gokd_session_t handle,
 extern "C" int32_t gokd_create_process(gokd_session_t handle,
                                         const char *cmd, uint32_t flags) {
     S;
-    wchar_t *wcmd = utf8_to_wide(cmd);
-    if (!wcmd) return E_OUTOFMEMORY;
-
     HRESULT hr;
-    free(wcmd);
 
-    /* Use the ANSI version with the base IDebugClient interface. */
+    /* CreateProcess requires a mutable PSTR. */
     char cmd_copy[4096];
     strncpy(cmd_copy, cmd, sizeof(cmd_copy) - 1);
     cmd_copy[sizeof(cmd_copy) - 1] = '\0';
 
-    fprintf(stderr, "[gokd] CreateProcessAndAttach cmd='%s'\n", cmd);
-
-    /* Cast to IDebugClient (base) to use the non-Wide API. */
-    IDebugClient *base_client = NULL;
-    hr = s->client->QueryInterface(__uuidof(IDebugClient), (void**)&base_client);
+    hr = s->client->CreateProcessAndAttach(0, cmd_copy,
+        flags ? flags : DEBUG_ONLY_THIS_PROCESS,
+        0, DEBUG_ATTACH_DEFAULT);
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    hr = base_client->CreateProcessAndAttach(
-        0,                         /* Server */
-        cmd_copy,                  /* CommandLine (PSTR, mutable) */
-        DEBUG_ONLY_THIS_PROCESS,   /* CreateFlags */
-        0,                         /* ProcessId */
-        DEBUG_ATTACH_DEFAULT       /* AttachFlags */
-    );
-    fprintf(stderr, "[gokd] CreateProcessAndAttach returned 0x%08x\n", (unsigned)hr);
-    base_client->Release();
-    if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
+    /*
+     * Process initial events until the target breaks in.
+     * CreateProcess puts the engine in NO_CHANGE (7) state.
+     * WaitForEvent processes events and the target reaches
+     * BREAK (6) once the initial breakpoint fires.
+     */
+    fprintf(stderr, "[gokd] create_process: calling WaitForEvent(INFINITE)...\n");
+    hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, INFINITE);
+    fprintf(stderr, "[gokd] create_process: WaitForEvent returned 0x%08x\n", (unsigned)hr);
 
-    /* Process initial events to reach the initial breakpoint. */
-    fprintf(stderr, "[gokd] Calling WaitForEvent...\n");
-    hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, 30000);
-    fprintf(stderr, "[gokd] WaitForEvent returned 0x%08x\n", (unsigned)hr);
-
-    ULONG exec_status = 0;
-    s->control->GetExecutionStatus(&exec_status);
-    fprintf(stderr, "[gokd] exec status = %lu\n", exec_status);
-
-    /* If the first WaitForEvent timed out, check if engine needs
-     * initial break. */
-    if (hr != S_OK && exec_status != DEBUG_STATUS_BREAK) {
-        s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
-        hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, 5000);
-        fprintf(stderr, "[gokd] retry WaitForEvent returned 0x%08x\n", (unsigned)hr);
-        s->control->GetExecutionStatus(&exec_status);
-        fprintf(stderr, "[gokd] retry exec status = %lu\n", exec_status);
-    }
+    ULONG final_status = 0;
+    s->control->GetExecutionStatus(&final_status);
+    fprintf(stderr, "[gokd] create_process: exec status = %lu\n", final_status);
 
     SET_LAST_ERROR(hr);
     return hr;
