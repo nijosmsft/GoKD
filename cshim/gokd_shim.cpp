@@ -67,7 +67,10 @@ static HRESULT wait_for_event_cancellable(gokd_session *s, ULONG timeout_ms) {
 
         HRESULT hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, this_timeout);
         if (hr == S_OK) return S_OK;   /* Event received. */
-        if (FAILED(hr) && hr != (HRESULT)S_FALSE) return hr; /* Real error. */
+        /* S_FALSE = timeout. E_NOTIMPL = transport not ready (retry for
+         * kernel targets). Any other failure is terminal. */
+        if (FAILED(hr) && hr != (HRESULT)S_FALSE && hr != E_NOTIMPL)
+            return hr;
 
         /* S_FALSE = timeout on this iteration. */
         elapsed += this_timeout;
