@@ -147,6 +147,32 @@ func (s *Session) Detach() error {
 	return hresult(hr)
 }
 
+// ── Remote debugging ──────────────────────────────────────────────
+
+func (s *Session) ConnectRemote(connection string) error {
+	var hr C.int32_t
+	s.exec(func() {
+		cconn := C.CString(connection)
+		defer C.free(unsafe.Pointer(cconn))
+		hr = C.gokd_connect_remote(s.handle, cconn)
+	})
+	return hresult(hr)
+}
+
+func (s *Session) DisconnectRemote() error {
+	var hr C.int32_t
+	s.exec(func() {
+		hr = C.gokd_disconnect_remote(s.handle)
+	})
+	return hresult(hr)
+}
+
+// CancelWait requests cancellation of a pending WaitForEvent.
+// Safe to call from any goroutine.
+func (s *Session) CancelWait() {
+	C.gokd_cancel_wait(s.handle)
+}
+
 // ── Execution ─────────────────────────────────────────────────────────
 
 // StopEvent mirrors gokd_stop_event_t.

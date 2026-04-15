@@ -250,6 +250,20 @@ int32_t gokd_open_dump(gokd_session_t s, const char *path);
 int32_t gokd_detach(gokd_session_t s);
 
 /* ====================================================================== */
+/*  Remote debugging                                                      */
+/* ====================================================================== */
+
+/*
+ * Connect to a remote process server (dbgsrv.exe).
+ * connection: "tcp:server=192.168.1.10,port=5005" etc.
+ * After connecting, AttachProcess/CreateProcess will target the remote.
+ */
+int32_t gokd_connect_remote(gokd_session_t s, const char *connection);
+
+/* Disconnect from the remote process server. */
+int32_t gokd_disconnect_remote(gokd_session_t s);
+
+/* ====================================================================== */
 /*  Execution control                                                     */
 /* ====================================================================== */
 
@@ -268,6 +282,13 @@ int32_t gokd_step_out(gokd_session_t s, gokd_stop_event_t *out);
  * Causes WaitForEvent to return on the dispatch thread.
  */
 int32_t gokd_break_in(gokd_session_t s);
+
+/*
+ * Request cancellation of a pending WaitForEvent. Safe from ANY thread.
+ * The dispatch thread checks this flag in its WaitForEvent loop and
+ * returns E_ABORT when set. Cleared automatically after being read.
+ */
+void gokd_cancel_wait(gokd_session_t s);
 
 /* ====================================================================== */
 /*  Memory                                                                */

@@ -41,6 +41,16 @@ struct gokd_session {
 
     /* Whether COM was initialised by us on this thread. */
     int com_initialised;
+
+    /* Remote process server handle (0 = local). */
+    ULONG64 remote_server;
+
+    /*
+     * Cancel flag for long WaitForEvent calls. Set from any thread
+     * (via gokd_cancel_wait), checked by the dispatch thread in the
+     * WaitForEvent loop. volatile for cross-thread visibility.
+     */
+    volatile int cancel_requested;
 };
 
 /* Get the session pointer from an opaque handle. */

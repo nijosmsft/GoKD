@@ -30,6 +30,53 @@
  */
 
 /* ====================================================================== */
+/*  Internal: cancellable WaitForEvent                                    */
+/* ====================================================================== */
+
+/*
+ * Wait for a debug event with cancellation support.
+ * Uses a loop of short WaitForEvent calls, checking the cancel flag
+ * between iterations. For truly indefinite waits (kernel debugging),
+ * this allows the Go side to cancel via gokd_cancel_wait().
+ *
+ * timeout_ms: total timeout in milliseconds, or 0 for infinite.
+ * Returns S_OK on event, E_ABORT if cancelled, or the last HRESULT.
+ */
+static HRESULT wait_for_event_cancellable(gokd_session *s, ULONG timeout_ms) {
+    const ULONG POLL_INTERVAL = 500; /* ms between cancel checks */
+    ULONG elapsed = 0;
+
+    for (;;) {
+        /* Check cancel flag. */
+        if (s->cancel_requested) {
+            s->cancel_requested = 0;
+            /* Force a break-in so the engine settles. */
+            s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
+            return E_ABORT;
+        }
+
+        /* Compute this iteration's timeout. */
+        ULONG this_timeout;
+        if (timeout_ms == 0) {
+            /* Infinite: poll forever with short intervals. */
+            this_timeout = POLL_INTERVAL;
+        } else {
+            ULONG remaining = timeout_ms - elapsed;
+            this_timeout = (remaining < POLL_INTERVAL) ? remaining : POLL_INTERVAL;
+        }
+
+        HRESULT hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, this_timeout);
+        if (hr == S_OK) return S_OK;   /* Event received. */
+        if (FAILED(hr) && hr != (HRESULT)S_FALSE) return hr; /* Real error. */
+
+        /* S_FALSE = timeout on this iteration. */
+        elapsed += this_timeout;
+        if (timeout_ms != 0 && elapsed >= timeout_ms)
+            return S_FALSE; /* Overall timeout. */
+    }
+}
+
+/* ====================================================================== */
 /*  Attach modes                                                          */
 /* ====================================================================== */
 
@@ -38,15 +85,12 @@ extern "C" int32_t gokd_attach_process(gokd_session_t handle,
     S;
     HRESULT hr;
 
-    /* Tell DbgEng to break at the initial attach event. */
     s->control->AddEngineOptions(DEBUG_ENGOPT_INITIAL_BREAK);
 
-    hr = s->client->AttachProcess(0, pid, flags);
+    hr = s->client->AttachProcess(s->remote_server, pid, flags);
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    /* Wait for the initial break. With INITIAL_BREAK set, WaitForEvent
-     * will return S_OK once the target is broken in. */
-    hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, 30000);
+    hr = wait_for_event_cancellable(s, 30000);
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -56,21 +100,18 @@ extern "C" int32_t gokd_create_process(gokd_session_t handle,
     S;
     HRESULT hr;
 
-    /* Tell DbgEng to break at the initial loader breakpoint. */
     s->control->AddEngineOptions(DEBUG_ENGOPT_INITIAL_BREAK);
 
-    /* CreateProcessAndAttach requires a mutable PSTR. */
     char cmd_copy[4096];
     strncpy(cmd_copy, cmd, sizeof(cmd_copy) - 1);
     cmd_copy[sizeof(cmd_copy) - 1] = '\0';
 
-    hr = s->client->CreateProcessAndAttach(0, cmd_copy,
+    hr = s->client->CreateProcessAndAttach(s->remote_server, cmd_copy,
         flags ? flags : DEBUG_ONLY_THIS_PROCESS,
         0, DEBUG_ATTACH_DEFAULT);
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    /* Wait for the initial break. */
-    hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, 30000);
+    hr = wait_for_event_cancellable(s, 30000);
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -81,14 +122,16 @@ extern "C" int32_t gokd_attach_kernel(gokd_session_t handle,
     wchar_t *wopts = utf8_to_wide(options);
     if (!wopts) return E_OUTOFMEMORY;
 
+    s->control->AddEngineOptions(DEBUG_ENGOPT_INITIAL_BREAK);
+
     HRESULT hr;
     hr = s->client->AttachKernelWide(DEBUG_ATTACH_KERNEL_CONNECTION, wopts);
-
     free(wopts);
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, INFINITE);
-
+    /* Kernel attach can take a long time (waiting for target to break).
+     * Use cancellable infinite wait so the Go side can abort. */
+    hr = wait_for_event_cancellable(s, 0 /* infinite */);
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -98,24 +141,51 @@ extern "C" int32_t gokd_open_dump(gokd_session_t handle, const char *path) {
     wchar_t *wpath = utf8_to_wide(path);
     if (!wpath) return E_OUTOFMEMORY;
 
+    s->control->AddEngineOptions(DEBUG_ENGOPT_INITIAL_BREAK);
+
     HRESULT hr;
     hr = s->client->OpenDumpFileWide(wpath, 0);
-
     free(wpath);
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, 30000);
-
+    /* Dump loading can be slow for large files; use cancellable wait. */
+    hr = wait_for_event_cancellable(s, 0 /* infinite */);
     SET_LAST_ERROR(hr);
     return hr;
 }
 
 extern "C" int32_t gokd_detach(gokd_session_t handle) {
     S;
-    HRESULT hr;
-    
-        hr = s->client->DetachProcesses();
+    HRESULT hr = s->client->DetachProcesses();
+    SET_LAST_ERROR(hr);
+    return hr;
+}
 
+/* ====================================================================== */
+/*  Remote debugging                                                      */
+/* ====================================================================== */
+
+extern "C" int32_t gokd_connect_remote(gokd_session_t handle,
+                                        const char *connection) {
+    S;
+    wchar_t *wconn = utf8_to_wide(connection);
+    if (!wconn) return E_OUTOFMEMORY;
+
+    ULONG64 server = 0;
+    HRESULT hr = s->client->ConnectProcessServerWide(wconn, &server);
+    free(wconn);
+    if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
+
+    s->remote_server = server;
+    return S_OK;
+}
+
+extern "C" int32_t gokd_disconnect_remote(gokd_session_t handle) {
+    S;
+    if (s->remote_server == 0) return S_OK;
+
+    HRESULT hr = s->client->DisconnectProcessServer(s->remote_server);
+    s->remote_server = 0;
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -128,15 +198,12 @@ static int32_t execute_and_wait(gokd_session *s, ULONG status,
                                 gokd_stop_event_t *out) {
     memset(&s->last_stop, 0, sizeof(s->last_stop));
 
-    HRESULT hr;
-    
-        hr = s->control->SetExecutionStatus(status);
-
+    HRESULT hr = s->control->SetExecutionStatus(status);
     if (FAILED(hr)) { s->last_error = hr; return hr; }
 
-    
-        hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, INFINITE);
-
+    /* Cancellable wait — Go side can call gokd_cancel_wait() or
+     * gokd_break_in() to interrupt. */
+    hr = wait_for_event_cancellable(s, 0 /* infinite */);
     if (FAILED(hr)) { s->last_error = hr; return hr; }
 
     /*
@@ -219,6 +286,12 @@ extern "C" int32_t gokd_break_in(gokd_session_t handle) {
     HRESULT hr = s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
     SET_LAST_ERROR(hr);
     return hr;
+}
+
+extern "C" void gokd_cancel_wait(gokd_session_t handle) {
+    /* Thread-safe: sets a volatile flag checked by the dispatch thread. */
+    gokd_session *s = gokd_get_session(handle);
+    if (s) s->cancel_requested = 1;
 }
 
 /* ====================================================================== */

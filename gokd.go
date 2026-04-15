@@ -30,9 +30,13 @@ type Session interface {
 	// Target attachment
 	AttachProcess(pid uint32, opts AttachOptions) error
 	CreateProcess(cmd string, opts CreateOptions) error
-	AttachKernel(connectStr string) error
+	AttachKernel(ctx context.Context, connectStr string) error
 	OpenDump(path string) error
 	Detach() error
+
+	// Remote debugging (connect to dbgsrv.exe process server)
+	ConnectRemote(connection string) error   // "tcp:server=host,port=5005"
+	DisconnectRemote() error
 
 	// Execution
 	Go(ctx context.Context) (*StopEvent, error)
@@ -280,12 +284,34 @@ func (s *session) CreateProcess(cmd string, opts CreateOptions) error {
 	return s.inner.CreateProcess(cmd, opts.Flags)
 }
 
-func (s *session) AttachKernel(connectStr string) error {
-	return s.inner.AttachKernel(connectStr)
+func (s *session) AttachKernel(ctx context.Context, connectStr string) error {
+	// Monitor context cancellation in a separate goroutine.
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.inner.CancelWait()
+		case <-done:
+		}
+	}()
+	err := s.inner.AttachKernel(connectStr)
+	close(done)
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
 }
 
 func (s *session) OpenDump(path string) error {
 	return s.inner.OpenDump(path)
+}
+
+func (s *session) ConnectRemote(connection string) error {
+	return s.inner.ConnectRemote(connection)
+}
+
+func (s *session) DisconnectRemote() error {
+	return s.inner.DisconnectRemote()
 }
 
 func (s *session) Detach() error {
@@ -308,36 +334,41 @@ func (s *session) makeStopEvent(cev dbgcgo.StopEvent) *StopEvent {
 	return ev
 }
 
-func (s *session) Go(ctx context.Context) (*StopEvent, error) {
-	cev, err := s.inner.Go()
+// execWithCancel runs an execution command with context cancellation support.
+func (s *session) execWithCancel(ctx context.Context, fn func() (dbgcgo.StopEvent, error)) (*StopEvent, error) {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.inner.CancelWait()
+		case <-done:
+		}
+	}()
+	cev, err := fn()
+	close(done)
+	if err != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		return nil, err
 	}
 	return s.makeStopEvent(cev), nil
+}
+
+func (s *session) Go(ctx context.Context) (*StopEvent, error) {
+	return s.execWithCancel(ctx, s.inner.Go)
 }
 
 func (s *session) StepIn(ctx context.Context) (*StopEvent, error) {
-	cev, err := s.inner.StepIn()
-	if err != nil {
-		return nil, err
-	}
-	return s.makeStopEvent(cev), nil
+	return s.execWithCancel(ctx, s.inner.StepIn)
 }
 
 func (s *session) StepOver(ctx context.Context) (*StopEvent, error) {
-	cev, err := s.inner.StepOver()
-	if err != nil {
-		return nil, err
-	}
-	return s.makeStopEvent(cev), nil
+	return s.execWithCancel(ctx, s.inner.StepOver)
 }
 
 func (s *session) StepOut(ctx context.Context) (*StopEvent, error) {
-	cev, err := s.inner.StepOut()
-	if err != nil {
-		return nil, err
-	}
-	return s.makeStopEvent(cev), nil
+	return s.execWithCancel(ctx, s.inner.StepOut)
 }
 
 func (s *session) BreakIn() error {
