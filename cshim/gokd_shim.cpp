@@ -38,36 +38,15 @@ extern "C" int32_t gokd_attach_process(gokd_session_t handle,
     S;
     HRESULT hr;
 
+    /* Tell DbgEng to break at the initial attach event. */
+    s->control->AddEngineOptions(DEBUG_ENGOPT_INITIAL_BREAK);
+
     hr = s->client->AttachProcess(0, pid, flags);
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    /*
-     * Process initial events until the target is broken in.
-     * DbgEng may need multiple WaitForEvent calls to process
-     * all pending events (process create, module loads, etc.).
-     */
-    s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
-
-    for (int attempt = 0; attempt < 20; attempt++) {
-        hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, 500);
-
-        ULONG exec_status = 0;
-        s->control->GetExecutionStatus(&exec_status);
-        if (exec_status == DEBUG_STATUS_BREAK)
-            return S_OK;
-
-        /* If still running, keep processing events. */
-        if (exec_status == DEBUG_STATUS_NO_DEBUGGEE) {
-            s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
-        }
-    }
-
-    /* Check final state. */
-    ULONG exec_status = 0;
-    s->control->GetExecutionStatus(&exec_status);
-    if (exec_status == DEBUG_STATUS_BREAK)
-        return S_OK;
-
+    /* Wait for the initial break. With INITIAL_BREAK set, WaitForEvent
+     * will return S_OK once the target is broken in. */
+    hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, 30000);
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -77,7 +56,10 @@ extern "C" int32_t gokd_create_process(gokd_session_t handle,
     S;
     HRESULT hr;
 
-    /* CreateProcess requires a mutable PSTR. */
+    /* Tell DbgEng to break at the initial loader breakpoint. */
+    s->control->AddEngineOptions(DEBUG_ENGOPT_INITIAL_BREAK);
+
+    /* CreateProcessAndAttach requires a mutable PSTR. */
     char cmd_copy[4096];
     strncpy(cmd_copy, cmd, sizeof(cmd_copy) - 1);
     cmd_copy[sizeof(cmd_copy) - 1] = '\0';
@@ -87,20 +69,8 @@ extern "C" int32_t gokd_create_process(gokd_session_t handle,
         0, DEBUG_ATTACH_DEFAULT);
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
-    /*
-     * Process initial events until the target breaks in.
-     * CreateProcess puts the engine in NO_CHANGE (7) state.
-     * WaitForEvent processes events and the target reaches
-     * BREAK (6) once the initial breakpoint fires.
-     */
-    fprintf(stderr, "[gokd] create_process: calling WaitForEvent(INFINITE)...\n");
-    hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, INFINITE);
-    fprintf(stderr, "[gokd] create_process: WaitForEvent returned 0x%08x\n", (unsigned)hr);
-
-    ULONG final_status = 0;
-    s->control->GetExecutionStatus(&final_status);
-    fprintf(stderr, "[gokd] create_process: exec status = %lu\n", final_status);
-
+    /* Wait for the initial break. */
+    hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, 30000);
     SET_LAST_ERROR(hr);
     return hr;
 }

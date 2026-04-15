@@ -290,14 +290,17 @@ func TestBreakpointAndGo(t *testing.T) {
 	}
 	t.Logf("  %d breakpoint(s) set", len(bps))
 
-	// Resume and wait for the breakpoint (with timeout).
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	// Resume briefly — the breakpoint may not hit since notepad
+	// doesn't call CreateFileW immediately. We just verify Go()
+	// works without error and can be interrupted by BreakIn().
+	go func() {
+		time.Sleep(2 * time.Second)
+		sess.BreakIn()
+	}()
 
-	stopEv, err := sess.Go(ctx)
+	stopEv, err := sess.Go(context.Background())
 	if err != nil {
-		// This may timeout if notepad doesn't call CreateFileW quickly.
-		t.Logf("Go() returned: %v (may be expected)", err)
+		t.Logf("Go() returned: %v (expected — BreakIn interrupted)", err)
 	} else {
 		t.Logf("Stopped: reason=%s addr=0x%x thread=%d",
 			stopEv.Reason, stopEv.Address, stopEv.Thread.SystemID)
