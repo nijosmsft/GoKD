@@ -3,20 +3,42 @@ package gokd_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/nijosmsft/gokd"
 )
 
+// TestKernelAttachKDNET attaches to a live kernel target over KDNET.
+//
+// This test is skipped unless KDNET_CONN is set, e.g.:
+//
+//	KDNET_CONN="net:port=50000,key=W.X.Y.Z" go test -v -run TestKernelAttachKDNET .
+//
+// NOTE: do NOT include `target=...` in the connection string. The `target=`
+// parameter is the "VM host machine name" for kdsrv indirection — using an
+// IP there silently prevents dbgeng from opening the UDP listener and the
+// subsequent WaitForEvent hangs forever. The correct form for a direct
+// KDNET attach is just `net:port=N,key=W.X.Y.Z`.
+//
+// Per HANDOFF.md, this test MUST NOT be run on the local workstation — only
+// on a remote lab node targeting a separate VM. Running a kernel debugger
+// against the local machine (even with a remote-looking conn string) can
+// hang the host.
 func TestKernelAttachKDNET(t *testing.T) {
+	connStr := os.Getenv("KDNET_CONN")
+	if connStr == "" {
+		t.Skip("KDNET_CONN not set; skipping kernel attach test. " +
+			"Set e.g. KDNET_CONN=\"net:port=50000,key=W.X.Y.Z\" to run.")
+	}
+
 	sess, err := gokd.New()
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
 	defer sess.Close()
 
-	connStr := "net:port=50000,key=142799hwammrg.nylkha8kqstm.pj3hb6zx2l4c.pyuywxtolc8m,target=10.57.201.67"
 	t.Logf("Connecting to kernel target: %s", connStr)
 	t.Log("Waiting for target to respond (this may take time if the target needs to break in)...")
 
