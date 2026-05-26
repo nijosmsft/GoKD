@@ -30,7 +30,7 @@ type Session interface {
 	// Target attachment
 	AttachProcess(pid uint32, opts AttachOptions) error
 	CreateProcess(cmd string, opts CreateOptions) error
-	AttachKernel(ctx context.Context, connectStr string) error
+	AttachKernel(ctx context.Context, connectStr string, opts KernelOptions) error
 	OpenDump(path string) error
 	Detach() error
 
@@ -123,6 +123,39 @@ var (
 type CreateOptions struct {
 	Flags         uint32
 	InitialBreak  bool
+}
+
+// KernelOptions controls kernel-target attach behaviour.
+//
+// InitialBreakIn requests an active break-in immediately after the transport
+// opens, so the engine pushes a break packet to the target as soon as the
+// connection handshakes. This makes the first break deterministic — without
+// it, kernel attaches can sit in WaitForEvent forever on an idle target
+// (the same way `kd.exe` waits passively until you press Ctrl+Break).
+//
+// Use KernelDefault for the recommended programmatic behaviour, or
+// KernelPassive for kd.exe-style "wait for the target to talk first".
+type KernelOptions struct {
+	InitialBreakIn bool
+}
+
+var (
+	KernelDefault = KernelOptions{InitialBreakIn: true}
+	KernelPassive = KernelOptions{InitialBreakIn: false}
+)
+
+// Kernel-attach flag bits forwarded to the C shim. Keep in sync with
+// GOKD_KERNEL_* in cshim/gokd_shim.h.
+const (
+	kernelFlagInitialBreakIn uint32 = 0x00000001
+)
+
+func (o KernelOptions) flags() uint32 {
+	var f uint32
+	if o.InitialBreakIn {
+		f |= kernelFlagInitialBreakIn
+	}
+	return f
 }
 
 // ── Types ─────────────────────────────────────────────────────────────
@@ -284,7 +317,7 @@ func (s *session) CreateProcess(cmd string, opts CreateOptions) error {
 	return s.inner.CreateProcess(cmd, opts.Flags)
 }
 
-func (s *session) AttachKernel(ctx context.Context, connectStr string) error {
+func (s *session) AttachKernel(ctx context.Context, connectStr string, opts KernelOptions) error {
 	// Monitor context cancellation in a separate goroutine.
 	done := make(chan struct{})
 	go func() {
@@ -294,7 +327,7 @@ func (s *session) AttachKernel(ctx context.Context, connectStr string) error {
 		case <-done:
 		}
 	}()
-	err := s.inner.AttachKernel(connectStr)
+	err := s.inner.AttachKernel(connectStr, opts.flags())
 	close(done)
 	if err != nil && ctx.Err() != nil {
 		return ctx.Err()

@@ -47,7 +47,7 @@ func TestKernelAttachKDNET(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	err = sess.AttachKernel(ctx, connStr)
+	err = sess.AttachKernel(ctx, connStr, gokd.KernelDefault)
 	if err != nil {
 		t.Fatalf("AttachKernel failed: %v (target may be unreachable or not in debug mode)", err)
 	}

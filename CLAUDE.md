@@ -127,9 +127,22 @@ direct kernel attach is just:
 net:port=N,key=W.X.Y.Z
 ```
 
-The `gokd_kernel_test.go` test currently has `target=10.57.201.67` baked in — that
-prevents the listener from starting and is the reason the test times out. Fix it by
-removing the `target=` segment.
+## Kernel attach: deterministic break-in
+
+`AttachKernel(ctx, connStr, opts KernelOptions)` takes a `KernelOptions` struct.
+`gokd.KernelDefault` (`InitialBreakIn: true`) is the recommended setting for
+programmatic use: after the transport opens, the shim calls
+`SetInterrupt(DEBUG_INTERRUPT_ACTIVE)` so the engine pushes a break packet to
+the target as soon as the link handshakes. Without this, the wait sits forever
+on an idle KDNET target (the same way `kd.exe` waits passively until you hit
+Ctrl+Break). `gokd.KernelPassive` (`InitialBreakIn: false`) preserves the old
+passive behaviour and is appropriate when attaching to a target that is
+already broken into the debugger.
+
+The implementation lives at the bottom of `gokd_attach_kernel` in
+`cshim/gokd_shim.cpp` (flag `GOKD_KERNEL_INITIAL_BREAK_IN` in `gokd_shim.h`).
+The flag bit value is duplicated in `gokd.go` as `kernelFlagInitialBreakIn`;
+keep them in sync.
 
 ## Implementation status
 

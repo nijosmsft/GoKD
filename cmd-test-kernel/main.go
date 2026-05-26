@@ -30,7 +30,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	if err := sess.AttachKernel(ctx, connStr); err != nil {
+	if err := sess.AttachKernel(ctx, connStr, gokd.KernelDefault); err != nil {
 		fmt.Fprintf(os.Stderr, "AttachKernel failed: %v\n", err)
 		os.Exit(1)
 	}

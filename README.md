@@ -182,13 +182,21 @@ Then from the host side, attach with:
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 defer cancel()
-err := sess.AttachKernel(ctx, "net:port=50000,key=1.2.3.4")
+err := sess.AttachKernel(ctx, "net:port=50000,key=1.2.3.4", gokd.KernelDefault)
 ```
 
-If the handshake completes but break-in stalls (KDNET says `Connected to target` but
-nothing further), the target kernel is reachable but not honouring NMI break — usually
-VBS / HVCI or a virtual-NIC quirk. Cause a real break-in (a workload bug check, a
-manual `Ctrl+ScrLk` on the target console, etc.) to engage the debugger.
+`gokd.KernelDefault` (the recommended option set for programmatic use)
+requests an active break-in immediately after the transport opens, so the
+first break is deterministic. Pass `gokd.KernelPassive` instead if you want
+kd.exe-style "wait for the target to talk first" behaviour — useful when
+attaching to a target that's already broken into the debugger.
+
+If the handshake completes but break-in still stalls (KDNET says
+`Connected to target` and the active interrupt was issued but nothing
+further), the target kernel is reachable but not honouring NMI break —
+usually VBS / HVCI or a virtual-NIC quirk. Cause a real break-in (a
+workload bug check, a manual `Ctrl+ScrLk` on the target console, etc.) to
+engage the debugger.
 
 ## Repository layout
 
@@ -221,7 +229,7 @@ PLAN.md, CLAUDE.md, README.md, LICENSE
 | `dbghelp.h:...: minidumpapiset.h: No such file or directory` | You set `WINDBG_SDK` and are pulling Windows Kits headers. Unset it — use MinGW's headers. |
 | `expected primary-expression before '__typeof'` near `__uuidof(...)` | Same root cause: Windows Kits `dbgeng.h` has no `__CRT_UUID_DECL`. Use MinGW's `dbgeng.h`. |
 | `gokd_create_session failed` | SDK `dbgeng.dll` not found. Install Windows SDK Debugging Tools, or set `GOKD_DBGENG_PATH`. |
-| `AttachKernel` returns `S_OK` but `WaitForEvent` hangs | Either `target=...` is in your connection string (remove it) or the target kernel isn't honouring break-in (see "Kernel debug" above). |
+| `AttachKernel` returns `S_OK` but `WaitForEvent` hangs | Either `target=...` is in your connection string (remove it), or the active break-in didn't reach the target. Confirm with `KernelDefault`; if still stalled, see "Kernel debug" above (likely VBS / HVCI on the target). |
 | `TestBreakpointAndGo` hangs on a server VM | Notepad can't launch without an interactive desktop. Run user-mode tests on a desktop host instead. |
 | Build link errors about missing `dbgeng_*` symbols | You added `-ldbgeng` to LDFLAGS. Don't — the shim loads `dbgeng.dll` dynamically. |
 

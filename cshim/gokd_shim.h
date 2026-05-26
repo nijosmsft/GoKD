@@ -240,8 +240,18 @@ int32_t gokd_create_process(gokd_session_t s, const char *cmd,
 /*
  * Attach to a kernel target.
  * options: "net:port=50000,key=..." or "com:port=\\\\.\\COM1,baud=115200"
+ * flags:   bitmask of GOKD_KERNEL_* values.
+ *
+ * When GOKD_KERNEL_INITIAL_BREAK_IN is set (recommended for programmatic
+ * use), the shim issues SetInterrupt(DEBUG_INTERRUPT_ACTIVE) immediately
+ * after the transport opens. This makes the engine push a break-in
+ * request to the target as soon as the connection handshakes, giving
+ * deterministic first-break behaviour (kd.exe waits passively because
+ * it's interactive — a library has no console to Ctrl+Break).
  */
-int32_t gokd_attach_kernel(gokd_session_t s, const char *options);
+#define GOKD_KERNEL_INITIAL_BREAK_IN 0x00000001
+int32_t gokd_attach_kernel(gokd_session_t s, const char *options,
+                            uint32_t flags);
 
 /* Open a crash dump or minidump file for offline analysis. */
 int32_t gokd_open_dump(gokd_session_t s, const char *path);

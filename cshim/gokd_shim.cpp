@@ -120,14 +120,29 @@ extern "C" int32_t gokd_create_process(gokd_session_t handle,
 }
 
 extern "C" int32_t gokd_attach_kernel(gokd_session_t handle,
-                                       const char *options) {
+                                       const char *options,
+                                       uint32_t flags) {
     S;
 
     s->control->AddEngineOptions(DEBUG_ENGOPT_INITIAL_BREAK);
 
     HRESULT hr = s->client->AttachKernel(DEBUG_ATTACH_KERNEL_CONNECTION, options);
-    fprintf(stderr, "[gokd] AttachKernel('%s') returned 0x%08x\n", options, (unsigned)hr);
+    fprintf(stderr, "[gokd] AttachKernel('%s', flags=0x%x) returned 0x%08x\n",
+            options, (unsigned)flags, (unsigned)hr);
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
+
+    /* Actively request a break-in so the wait below has something to
+     * resolve. Without this, kd.exe-style passive waits sit forever on
+     * KDNET targets that have nothing to report. SetInterrupt is safe
+     * to call here even though the transport may not yet have
+     * handshaked — dbgeng queues the interrupt and dispatches it as
+     * soon as the link is live. Ignore the return: any failure just
+     * means we fall back to the original passive wait behaviour. */
+    if (flags & GOKD_KERNEL_INITIAL_BREAK_IN) {
+        HRESULT ihr = s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
+        fprintf(stderr, "[gokd] SetInterrupt(ACTIVE) returned 0x%08x\n",
+                (unsigned)ihr);
+    }
 
     /* Kernel attach can take a long time (waiting for target to break).
      * Use cancellable infinite wait so the Go side can abort. */

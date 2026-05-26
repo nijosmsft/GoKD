@@ -119,12 +119,12 @@ func (s *Session) CreateProcess(cmd string, flags uint32) error {
 	return hresult(hr)
 }
 
-func (s *Session) AttachKernel(options string) error {
+func (s *Session) AttachKernel(options string, flags uint32) error {
 	var hr C.int32_t
 	s.exec(func() {
 		copts := C.CString(options)
 		defer C.free(unsafe.Pointer(copts))
-		hr = C.gokd_attach_kernel(s.handle, copts)
+		hr = C.gokd_attach_kernel(s.handle, copts, C.uint32_t(flags))
 	})
 	return hresult(hr)
 }
