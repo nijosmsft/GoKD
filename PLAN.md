@@ -117,6 +117,8 @@ clean:
 
 `WINDBG_SDK` points to the Debugging Tools for Windows SDK directory
 (e.g. `C:\Program Files (x86)\Windows Kits\10\Debuggers\x64`).
+(Modern Windows SDK installs place headers under `Debuggers\inc\` rather than
+`Debuggers\x64\sdk\inc\`; the Makefile probes both layouts.)
 
 ### CGo directives (internal/dbgcgo/dbgeng.go)
 
@@ -972,6 +974,8 @@ GoKD avoids this problem by design:
 ```
 set WINDBG_SDK=C:\Program Files (x86)\Windows Kits\10\Debuggers\x64
 ```
+(Modern Windows SDK installs put headers under `Debuggers\inc\` instead of
+`Debuggers\x64\sdk\inc\`; the Makefile probes both layouts.)
 
 ---
 

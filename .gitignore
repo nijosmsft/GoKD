@@ -7,9 +7,19 @@ cshim/*.o
 *.a
 *.o
 
+# Deploy bundle (built by README "Deploying" steps)
+deploy/
+deploy.zip
+
 # Go
 bin/
 vendor/
+
+# Agent state
+.claude/
+
+# Agent handoff notes (contain internal lab info; keep local)
+HANDOFF.md
 
 # IDE
 .vscode/

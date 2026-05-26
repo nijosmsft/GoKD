@@ -7,7 +7,10 @@
 #   - Windows SDK / Debugging Tools for Windows
 #
 # Set WINDBG_SDK to the Debugging Tools directory, e.g.:
-#   export WINDBG_SDK="/c/Program Files (x86)/Windows Kits/10/Debuggers/x64"
+#   export WINDBG_SDK="/c/Program Files (x86)/Windows Kits/10/Debuggers"
+# Modern Windows SDK installs put headers at $(WINDBG_SDK)/inc.
+# Legacy standalone Debugging Tools SDKs put them at $(WINDBG_SDK)/sdk/inc
+# (in which case WINDBG_SDK typically ends in /x64). Both layouts are probed.
 #
 # Usage:
 #   make           # build lib/libgokd_shim.a
@@ -19,7 +22,10 @@ CXXFLAGS  = -std=c++17 -Wall -Wextra -Wno-unused-parameter -O2
 
 # Windows SDK include paths for dbgeng.h / dbghelp.h.
 # These are typically found in the Debugging Tools SDK or the Windows SDK.
+# Probe both modern (Debuggers/inc) and legacy (Debuggers/x64/sdk/inc) layouts;
+# g++ silently ignores -I directories that do not exist.
 ifdef WINDBG_SDK
+CXXFLAGS += -I"$(WINDBG_SDK)/inc"
 CXXFLAGS += -I"$(WINDBG_SDK)/sdk/inc"
 endif
 
