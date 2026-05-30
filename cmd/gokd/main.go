@@ -41,7 +41,14 @@ func main() {
 	cfg := parseFlags()
 	commandTimeout = cfg.timeout
 
-	sess, err := gokd.New()
+	var newOpts []gokd.Option
+	if cfg.symbols != "" {
+		newOpts = append(newOpts, gokd.WithSymbolPath(cfg.symbols))
+	} else {
+		newOpts = append(newOpts, gokd.WithDefaultSymbols())
+	}
+
+	sess, err := gokd.New(newOpts...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "New() failed: %v\n", err)
 		os.Exit(1)
@@ -61,12 +68,6 @@ func main() {
 	if cfg.remote != "" {
 		if err := sess.ConnectRemote(cfg.remote); err != nil {
 			fmt.Fprintf(os.Stderr, "ConnectRemote failed: %v\n", err)
-			os.Exit(1)
-		}
-	}
-	if cfg.symbols != "" {
-		if err := sess.SetSymbolPath(cfg.symbols); err != nil {
-			fmt.Fprintf(os.Stderr, "SetSymbolPath failed: %v\n", err)
 			os.Exit(1)
 		}
 	}
@@ -92,7 +93,7 @@ func parseFlags() cliConfig {
 	flag.StringVar(&cfg.kernel, "kernel", "", "kernel attach connection string")
 	flag.StringVar(&cfg.dump, "dump", "", "open crash dump")
 	flag.StringVar(&cfg.remote, "remote", "", "connect to dbgsrv")
-	flag.StringVar(&cfg.symbols, "symbols", "", "set symbol path")
+	flag.StringVar(&cfg.symbols, "symbols", "", "set symbol path (default: Microsoft public symbols via WithDefaultSymbols)")
 	flag.StringVar(&cfg.command, "c", "", "run semicolon-separated commands and quit")
 	flag.DurationVar(&cfg.timeout, "timeout", 0, "timeout for AttachKernel and execution")
 	flag.Parse()

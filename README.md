@@ -96,7 +96,7 @@ import (
 )
 
 func main() {
-    sess, err := gokd.New()
+    sess, err := gokd.New(gokd.WithDefaultSymbols())
     if err != nil {
         log.Fatal(err)
     }
@@ -113,6 +113,21 @@ func main() {
     }
 }
 ```
+
+### Symbol path
+
+The DbgEng symbol path drives every `lm`-style listing, stack unwind, and `?` expression.
+`gokd.New` accepts functional options to configure it:
+
+* `gokd.WithSymbolPath(path)` — set an explicit path (e.g. an internal `\\symsrv\share`).
+* `gokd.WithDefaultSymbols()` — install the Microsoft public symbol server plus a
+  per-user cache (under `os.UserCacheDir()\gokd\symbols`) **only if** DbgEng's path is
+  empty after session creation. So a user's `_NT_SYMBOL_PATH` always wins.
+* No option — leave whatever DbgEng picked up at startup untouched (typically the
+  `_NT_SYMBOL_PATH` env var, or empty).
+
+The bundled `cmd/gokd` REPL and `cmd/gokd-mcp` server both default to
+`WithDefaultSymbols()`; pass `-symbols PATH` to override.
 
 ## Interactive CLI
 

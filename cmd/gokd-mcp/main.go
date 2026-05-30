@@ -36,7 +36,14 @@ func main() {
 
 	engineLog := log.New(logWriter, "[engine] ", 0)
 
-	sess, err := gokd.New()
+	var newOpts []gokd.Option
+	if cfg.symbols != "" {
+		newOpts = append(newOpts, gokd.WithSymbolPath(cfg.symbols))
+	} else {
+		newOpts = append(newOpts, gokd.WithDefaultSymbols())
+	}
+
+	sess, err := gokd.New(newOpts...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "New() failed: %v\n", err)
 		os.Exit(1)
@@ -47,13 +54,6 @@ func main() {
 	}()
 
 	startAsyncDrainers(sess, engineLog)
-
-	if cfg.symbols != "" {
-		if err := sess.SetSymbolPath(cfg.symbols); err != nil {
-			fmt.Fprintf(os.Stderr, "SetSymbolPath failed: %v\n", err)
-			os.Exit(1)
-		}
-	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "gokd-mcp", Version: "0.1.0"}, &mcp.ServerOptions{
 		Instructions: "Stateful MCP server for Windows DbgEng debugging through GoKD. Attach or open a target before inspection tools.",
@@ -69,7 +69,7 @@ func main() {
 
 func parseFlags() config {
 	var cfg config
-	flag.StringVar(&cfg.symbols, "symbols", "", "set symbol path at startup")
+	flag.StringVar(&cfg.symbols, "symbols", "", "set symbol path at startup (default: Microsoft public symbols via WithDefaultSymbols)")
 	flag.StringVar(&cfg.logPath, "log", "", "log MCP traffic and engine output to this file")
 	flag.Parse()
 	return cfg

@@ -6,7 +6,7 @@
 //
 // Usage:
 //
-//	sess, err := gokd.New()
+//	sess, err := gokd.New(gokd.WithDefaultSymbols())
 //	if err != nil { log.Fatal(err) }
 //	defer sess.Close()
 //
@@ -20,6 +20,9 @@ package gokd
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/nijosmsft/gokd/internal/dbgcgo"
 )
@@ -98,14 +101,80 @@ type Session interface {
 }
 
 // New creates a new debug session.
-func New() (Session, error) {
+//
+// Options can be supplied to configure session-wide settings such as the
+// symbol path; see [WithSymbolPath] and [WithDefaultSymbols].
+func New(opts ...Option) (Session, error) {
+	var o sessionOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	inner, err := dbgcgo.NewSession()
 	if err != nil {
 		return nil, err
 	}
 	s := &session{inner: inner}
 	s.eventCh, s.outputCh = inner.RegisterCallbacks(256, 256)
+
+	if o.symbolPathSet {
+		if err := s.SetSymbolPath(o.symbolPath); err != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("set symbol path: %w", err)
+		}
+	} else if o.useDefaultSymbols {
+		current, err := s.SymbolPath()
+		if err == nil && strings.TrimSpace(current) == "" {
+			if err := s.SetSymbolPath(DefaultSymbolPath()); err != nil {
+				_ = s.Close()
+				return nil, fmt.Errorf("set default symbol path: %w", err)
+			}
+		}
+	}
 	return s, nil
+}
+
+// Option configures a new debug session created by [New].
+type Option func(*sessionOptions)
+
+type sessionOptions struct {
+	symbolPath        string
+	symbolPathSet     bool
+	useDefaultSymbols bool
+}
+
+// WithSymbolPath sets the DbgEng symbol path immediately after the session
+// is created. Use this when you have an explicit symbol path that should
+// always win, regardless of the environment.
+func WithSymbolPath(path string) Option {
+	return func(o *sessionOptions) {
+		o.symbolPath = path
+		o.symbolPathSet = true
+	}
+}
+
+// WithDefaultSymbols installs a sensible symbol path if and only if no path
+// is already configured by DbgEng (e.g. via the _NT_SYMBOL_PATH environment
+// variable). The default is the Microsoft public symbol server combined with
+// a per-user local cache — see [DefaultSymbolPath].
+//
+// Has no effect if [WithSymbolPath] is also supplied: the explicit path wins.
+func WithDefaultSymbols() Option {
+	return func(o *sessionOptions) {
+		o.useDefaultSymbols = true
+	}
+}
+
+// DefaultSymbolPath returns the symbol path that [WithDefaultSymbols] would
+// install when the engine has no path configured: the Microsoft public symbol
+// server plus a per-user local cache at
+// "<UserCacheDir>\gokd\symbols" (or "<TempDir>\gokd\symbols" as a fallback).
+func DefaultSymbolPath() string {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil || cacheDir == "" {
+		cacheDir = os.TempDir()
+	}
+	symCache := filepath.Join(cacheDir, "gokd", "symbols")
+	return fmt.Sprintf("srv*%s*https://msdl.microsoft.com/download/symbols", symCache)
 }
 
 // ── Options ───────────────────────────────────────────────────────────
