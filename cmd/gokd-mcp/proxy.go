@@ -1,8 +1,24 @@
 package main
 
+// proxy.go owns -remote stdio<->Forward proxying.
+//
+// Listener-side lifecycle (t4-3) — instead of Start-Process + zombie
+// hunting, we ask the agent to launch gokd-mcp.exe as a tracked detached
+// Execute. The agent returns a job_id; we keep it on remoteProxy and:
+//
+//   * cancel it on teardown (defer),
+//   * watch it for early termination via WatchJobs and bail out fast,
+//   * cancel any sibling jobs left over by previous proxy sessions.
+//
+// Auth-token (t3-6 client side) — the listener is spawned with
+// -auth-token <random hex>. The proxy sends "AUTH <token>\n" as the
+// first data frame after the Forward TargetAddr header, and reads
+// "OK\n" before shuttling.
+
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -13,9 +29,7 @@ import (
 	"sync"
 	"time"
 
-	llagent "github.com/nijosmsft/lablink/pkg/agentclient"
 	llreg "github.com/nijosmsft/lablink/pkg/registry"
-	llsec "github.com/nijosmsft/lablink/pkg/security"
 	pb "github.com/nijosmsft/lablink/proto/agent"
 )
 
@@ -23,42 +37,82 @@ const (
 	remoteListenPort = 8765
 	remoteInstallDir = `C:\gokd`
 	remoteLogPath    = `C:\gokd\gokd-mcp.log`
+
+	// listenerJobMarker is a substring of the Job.Command field for any
+	// listener spawned by t4-3. ListJobs/CancelStaleListeners scan for it.
+	listenerJobMarker = `gokd-mcp.exe -listen 127.0.0.1:8765`
 )
 
-// runRemoteProxy turns this process into a stdio proxy whose other end is a
-// gokd-mcp.exe running on a remote lablink node. The flow:
+// remoteProxy carries the resources spanning one -remote session: the
+// lablink client, the resolved node, the auth token used to spawn the
+// listener, and the job_id returned by the agent. teardown() is wired
+// via defer in runRemoteProxy so a panic, ctx cancel, or stream error
+// still cancels the remote job.
+type remoteProxy struct {
+	ll        *lablinkClient
+	client    pb.NodeAgentClient
+	node      *llreg.Node
+	authToken string
+	jobID     string
+	logf      func(string, ...any)
+}
+
+// runRemoteProxy turns this process into a stdio proxy whose other end
+// is a gokd-mcp.exe running on a remote lablink node. The flow is:
 //
-//  1. Resolve node + TLS + token from lablink env vars.
-//  2. Sync local gokd-mcp.exe + DLLs to C:\gokd\ on the node (skip if hashes match).
-//  3. Kill any pre-existing gokd-mcp.exe on the node, then spawn ours with -listen.
-//  4. Open a single Forward gRPC stream to 127.0.0.1:8765 on the node.
-//  5. io.Copy stdin (from Copilot) ↔ stream.
+//  1. Resolve node + TLS + token from lablink env vars (lablinkClient).
+//  2. Generate a per-session auth token for the remote listener.
+//  3. Sync local gokd-mcp.exe + DLLs to C:\gokd\ on the node (skip if hashed equal).
+//  4. Cancel any stale listener jobs from previous proxy sessions.
+//  5. Detached Execute "gokd-mcp.exe -listen ... -auth-token ..." -> tracked job_id.
+//  6. Probe the listener (with AUTH) until it accepts, or fail fast on early job exit.
+//  7. Background goroutine watches WatchJobs; if the listener job terminates,
+//     cancel the proxy ctx so the Forward stream tears down.
+//  8. Open one Forward gRPC stream, do AUTH handshake inline, byte-shuttle stdio.
 func runRemoteProxy(cfg config, logWriter io.Writer) error {
 	logf := func(format string, args ...any) {
 		fmt.Fprintf(logWriter, "[gokd-mcp:remote] "+format+"\n", args...)
 	}
 
-	pool, node, err := dialLablinkNode(cfg.remote, logf)
+	ll := newLablinkClient(logf)
+	defer ll.close()
+
+	if _, _, err := ll.get(); err != nil {
+		return err
+	}
+	client, node, err := ll.clientFor(cfg.remote)
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
-
-	client, err := pool.GetClient(node.Address, node.TLSServerName)
-	if err != nil {
-		return fmt.Errorf("get agent client for %s: %w", cfg.remote, err)
-	}
+	logf("node %s -> %s", cfg.remote, node.Address)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	authToken, err := newAuthToken()
+	if err != nil {
+		return fmt.Errorf("generate auth token: %w", err)
+	}
+
+	p := &remoteProxy{
+		ll: ll, client: client, node: node,
+		authToken: authToken, logf: logf,
+	}
 
 	if err := deployToRemote(ctx, client, logf); err != nil {
 		return fmt.Errorf("deploy to %s: %w", cfg.remote, err)
 	}
 
-	if err := startRemoteEngine(ctx, client, logf); err != nil {
+	jobID, err := startRemoteListener(ctx, client, authToken, logf)
+	p.jobID = jobID
+	defer p.teardown(context.Background())
+	if err != nil {
 		return fmt.Errorf("start remote gokd-mcp on %s: %w", cfg.remote, err)
 	}
+
+	// Watch for the listener job dying so we don't sit forever on a dead
+	// Forward stream. The watcher cancels the proxy ctx on terminal status.
+	go p.watchListener(ctx, cancel)
 
 	logf("opening forward tunnel to 127.0.0.1:%d on %s", remoteListenPort, cfg.remote)
 	stream, err := client.Forward(ctx)
@@ -68,66 +122,70 @@ func runRemoteProxy(cfg config, logWriter io.Writer) error {
 	if err := stream.Send(&pb.ForwardChunk{TargetAddr: fmt.Sprintf("127.0.0.1:%d", remoteListenPort)}); err != nil {
 		return fmt.Errorf("send forward header: %w", err)
 	}
+	if err := authenticateRemoteStream(stream, authToken); err != nil {
+		return fmt.Errorf("auth remote listener: %w", err)
+	}
 
 	return shuttleStdio(stream, logf)
 }
 
-// dialLablinkNode loads the lablink registry + TLS config + token from env,
-// resolves the named node, and returns a connected pool.
-func dialLablinkNode(name string, logf func(string, ...any)) (*llagent.Pool, *llreg.Node, error) {
-	configDir := llsec.FirstPresentEnv("LABLINK_HOME", "DEVICE_INTERACTION_HOME")
-	if configDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, nil, fmt.Errorf("home dir: %w", err)
-		}
-		configDir = filepath.Join(home, ".lablink")
+// newAuthToken returns 32 random bytes hex-encoded. Result is 64 chars,
+// shell-safe, contains no whitespace, and satisfies the -auth-token
+// minimum-16-char validator in parseFlags.
+func newAuthToken() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
 	}
-
-	nodesFile := llsec.FirstPresentEnv("LABLINK_NODES", "DEVICE_INTERACTION_NODES")
-	if nodesFile == "" {
-		nodesFile = filepath.Join(configDir, "nodes.json")
-	}
-	logf("registry: %s", nodesFile)
-
-	reg := llreg.Load(nodesFile)
-	node, ok := reg.GetNode(name)
-	if !ok {
-		return nil, nil, fmt.Errorf("node %q not found in %s", name, nodesFile)
-	}
-	logf("node %s -> %s", name, node.Address)
-
-	token, src, err := llsec.ResolveToken(
-		"", "",
-		[]string{"LABLINK_AGENT_TOKEN", "DEVICE_AGENT_TOKEN"},
-		[]string{"LABLINK_AGENT_TOKEN_FILE"},
-	)
-	if err != nil {
-		return nil, nil, fmt.Errorf("token: %w", err)
-	}
-	if token == "" {
-		return nil, nil, errors.New("missing shared auth token; set LABLINK_AGENT_TOKEN or LABLINK_AGENT_TOKEN_FILE")
-	}
-	logf("token source: %s", src)
-
-	allowInsecure, err := llsec.AllowInsecure(false)
-	if err != nil {
-		return nil, nil, err
-	}
-	transport, err := llsec.ResolveClientTransport(
-		llsec.FirstPresentEnv("LABLINK_TRANSPORT"),
-		allowInsecure,
-		llsec.FirstPresentEnv("LABLINK_TLS_CA", "LABLINK_TLS_CA_CERT"),
-		llsec.FirstPresentEnv("LABLINK_TLS_CERT", "LABLINK_TLS_CLIENT_CERT"),
-		llsec.FirstPresentEnv("LABLINK_TLS_KEY", "LABLINK_TLS_CLIENT_KEY"),
-		llsec.FirstPresentEnv("LABLINK_TLS_SERVER_NAME"),
-	)
-	if err != nil {
-		return nil, nil, err
-	}
-	return llagent.NewPool(token, transport), node, nil
+	return hex.EncodeToString(b[:]), nil
 }
 
+// teardown cancels the listener job. Called via defer so it runs on any
+// exit path: clean shutdown, error from startup, or panic. Uses a fresh
+// 10s context so teardown survives the caller's cancelled ctx.
+func (p *remoteProxy) teardown(parent context.Context) {
+	if p.jobID == "" {
+		return
+	}
+	tctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	p.logf("cancelling listener job %s", p.jobID)
+	if _, err := p.client.CancelJob(tctx, &pb.CancelJobRequest{JobId: p.jobID, Force: true}); err != nil {
+		p.logf("cancel job failed: %v", err)
+	}
+}
+
+// watchListener subscribes to the agent's WatchJobs stream and watches
+// for our listener job entering a terminal status (EXITED / CANCELED /
+// ORPHANED). When it does, we log the tail of its captured output and
+// cancel the proxy ctx so the Forward stream errors out cleanly.
+//
+// The goroutine returns silently when the parent ctx is cancelled.
+func (p *remoteProxy) watchListener(ctx context.Context, cancelProxy context.CancelFunc) {
+	stream, err := p.client.WatchJobs(ctx, &pb.WatchJobsRequest{})
+	if err != nil {
+		p.logf("watch jobs: %v", err)
+		return
+	}
+	for {
+		ev, rerr := stream.Recv()
+		if rerr != nil {
+			return
+		}
+		if ev.Job == nil || ev.Job.JobId != p.jobID {
+			continue
+		}
+		if isTerminalStatus(ev.Job.Status) {
+			tail := fetchJobTail(ctx, p.client, p.jobID, 100)
+			p.logf("listener job %s terminated: status=%v exit=%d output=%s",
+				p.jobID, ev.Job.Status, ev.Job.ExitCode, tail)
+			cancelProxy()
+			return
+		}
+	}
+}
+
+// deployFile is one (local, remote) pair fed to deployToRemote.
 type deployFile struct {
 	localPath  string
 	remotePath string
@@ -175,8 +233,8 @@ func deployToRemote(ctx context.Context, client pb.NodeAgentClient, logf func(st
 		if err != nil {
 			return fmt.Errorf("hash %s: %w", f.localPath, err)
 		}
-		remoteHash, _ := remoteHash(ctx, client, f.remotePath)
-		if remoteHash == localHash {
+		remoteHashVal, _ := remoteHash(ctx, client, f.remotePath)
+		if remoteHashVal == localHash {
 			logf("skip %s (hash match)", filepath.Base(f.localPath))
 			continue
 		}
@@ -188,39 +246,164 @@ func deployToRemote(ctx context.Context, client pb.NodeAgentClient, logf func(st
 	return nil
 }
 
-// startRemoteEngine kills any stale gokd-mcp.exe and starts a fresh one with
-// -listen on the conventional port. Idempotent.
-func startRemoteEngine(ctx context.Context, client pb.NodeAgentClient, logf func(string, ...any)) error {
-	logf("killing any stale gokd-mcp.exe on node")
-	_, _, _, _ = remoteRun(ctx, client,
-		`Get-Process -Name gokd-mcp -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue`,
-		10)
+// startRemoteListener spawns gokd-mcp -listen on the node as a tracked
+// detached Execute job, kills any pre-existing listener jobs first, and
+// waits for the new one to accept connections. Returns the job_id so the
+// caller can cancel it on teardown and watch it for early death.
+func startRemoteListener(ctx context.Context, client pb.NodeAgentClient, authToken string, logf func(string, ...any)) (string, error) {
+	cancelStaleListeners(ctx, client, logf)
 
-	cmd := fmt.Sprintf(`Start-Process -FilePath '%s\gokd-mcp.exe' -ArgumentList '-listen','127.0.0.1:%d','-log','%s' -WorkingDirectory '%s' -WindowStyle Hidden`,
-		remoteInstallDir, remoteListenPort, remoteLogPath, remoteInstallDir)
-	logf("starting remote gokd-mcp")
-	if _, _, _, err := remoteRun(ctx, client, cmd, 15); err != nil {
-		return fmt.Errorf("start: %w", err)
+	// Build the command. We invoke gokd-mcp.exe directly (no
+	// Start-Process); the agent's Detach branch already gives us
+	// OS-level detachment via the JobManager.
+	cmd := fmt.Sprintf(`& '%s\gokd-mcp.exe' -listen 127.0.0.1:%d -log '%s' -auth-token %s`,
+		remoteInstallDir, remoteListenPort, remoteLogPath, authToken)
+	logf("starting remote gokd-mcp listener (tracked job)")
+
+	stream, err := client.Execute(ctx, &pb.ExecuteRequest{
+		Command:        cmd,
+		Shell:          "powershell",
+		WorkingDir:     remoteInstallDir,
+		Detach:         true,
+		TimeoutSeconds: 0,
+	})
+	if err != nil {
+		return "", fmt.Errorf("execute detach: %w", err)
 	}
+	var jobID string
+	for {
+		msg, rerr := stream.Recv()
+		if rerr != nil {
+			if errors.Is(rerr, io.EOF) {
+				break
+			}
+			return jobID, fmt.Errorf("execute recv: %w", rerr)
+		}
+		if msg.JobId != "" {
+			jobID = msg.JobId
+		}
+		if msg.Done {
+			break
+		}
+	}
+	if jobID == "" {
+		return "", errors.New("agent did not return a job_id for detached gokd-mcp")
+	}
+	logf("listener job %s started", jobID)
 
+	// Wait for the listener to accept. We probe via Forward + AUTH so we
+	// also validate the new auth token round-trips; a successful probe
+	// rules out both transport and auth failures. Bail out early if the
+	// job dies before accepting (e.g. -auth-token rejected by parseFlags
+	// on an older binary).
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := probeForward(ctx, client); err == nil {
+		if err := probeForwardAuth(ctx, client, authToken); err == nil {
 			logf("remote engine ready")
-			return nil
+			return jobID, nil
+		}
+		if job, gerr := client.GetJob(ctx, &pb.GetJobRequest{JobId: jobID}); gerr == nil &&
+			job.Job != nil && isTerminalStatus(job.Job.Status) {
+			tail := fetchJobTail(ctx, client, jobID, 100)
+			return jobID, fmt.Errorf("listener job %s terminated before accepting: status=%v exit=%d output=%s",
+				jobID, job.Job.Status, job.Job.ExitCode, tail)
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	return errors.New("remote engine did not come up within 15s")
+	return jobID, errors.New("remote engine did not come up within 15s")
 }
 
-func probeForward(ctx context.Context, client pb.NodeAgentClient) error {
-	stream, err := client.Forward(ctx)
+// cancelStaleListeners enumerates currently-running jobs and cancels any
+// whose command matches a previous gokd-mcp -listen invocation. Also
+// runs a belt-and-braces Stop-Process for pre-t4-3 untracked listeners.
+//
+// Per design § 6.3.4 we deliberately do NOT try to reuse a stale listener
+// — its auth token was generated by a previous proxy session and is now
+// unknown. Cancel-and-respawn is simpler and ~1s in the noise of
+// deployToRemote's hash check.
+func cancelStaleListeners(ctx context.Context, client pb.NodeAgentClient, logf func(string, ...any)) {
+	resp, err := client.ListJobs(ctx, &pb.ListJobsRequest{
+		StatusFilter: pb.JobStatus_JOB_STATUS_RUNNING,
+		Limit:        50,
+	})
+	if err != nil {
+		logf("list jobs: %v", err)
+	} else {
+		for _, j := range resp.Jobs {
+			if !strings.Contains(j.Command, listenerJobMarker) {
+				continue
+			}
+			logf("cancelling stale listener job %s", j.JobId)
+			_, _ = client.CancelJob(ctx, &pb.CancelJobRequest{JobId: j.JobId, Force: true})
+		}
+	}
+	// Belt-and-braces for pre-t4-3 untracked instances (Start-Process
+	// orphans). Ignore errors.
+	_, _, _, _ = remoteRun(ctx, client,
+		`Get-Process -Name gokd-mcp -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue`,
+		10)
+}
+
+// fetchJobTail retrieves the most recent N lines of stdout+stderr for a
+// job. Used in error messages so a "listener died" failure shows what
+// actually went wrong on the node.
+func fetchJobTail(ctx context.Context, client pb.NodeAgentClient, jobID string, lines int32) string {
+	resp, err := client.GetJobOutput(ctx, &pb.GetJobOutputRequest{
+		JobId:     jobID,
+		Stream:    pb.GetJobOutputRequest_BOTH,
+		TailLines: lines,
+		MaxBytes:  64 * 1024,
+	})
+	if err != nil {
+		return fmt.Sprintf("(no output: %v)", err)
+	}
+	out := strings.TrimRight(string(resp.Stdout), "\r\n")
+	if len(resp.Stderr) > 0 {
+		if out != "" {
+			out += "\n"
+		}
+		out += "--stderr--\n" + strings.TrimRight(string(resp.Stderr), "\r\n")
+	}
+	if resp.Truncated {
+		out += "\n(truncated)"
+	}
+	return out
+}
+
+// isTerminalStatus reports whether the JobStatus indicates the job is no
+// longer running. Used by watchListener and the startup probe loop.
+func isTerminalStatus(s pb.JobStatus) bool {
+	switch s {
+	case pb.JobStatus_JOB_STATUS_EXITED,
+		pb.JobStatus_JOB_STATUS_CANCELED,
+		pb.JobStatus_JOB_STATUS_ORPHANED:
+		return true
+	}
+	return false
+}
+
+// probeForwardAuth opens a Forward stream, performs the AUTH handshake,
+// and immediately half-closes — verifying the listener is accepting
+// connections AND that the auth token round-trips. Used by startRemoteListener
+// to wait for readiness without spamming "auth failed" warnings on the
+// listener side (which a token-less probe would).
+func probeForwardAuth(ctx context.Context, client pb.NodeAgentClient, authToken string) error {
+	pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	stream, err := client.Forward(pctx)
 	if err != nil {
 		return err
 	}
 	if err := stream.Send(&pb.ForwardChunk{TargetAddr: fmt.Sprintf("127.0.0.1:%d", remoteListenPort)}); err != nil {
 		return err
+	}
+	if authToken != "" {
+		if err := stream.Send(&pb.ForwardChunk{Data: []byte("AUTH " + authToken + "\n")}); err != nil {
+			return err
+		}
+		if err := readAuthResp(stream); err != nil {
+			return err
+		}
 	}
 	if err := stream.Send(&pb.ForwardChunk{Close: true}); err != nil {
 		return err
@@ -237,9 +420,54 @@ func probeForward(ctx context.Context, client pb.NodeAgentClient) error {
 	}
 }
 
-// shuttleStdio bridges the local stdin/stdout with the Forward stream. We
-// run two goroutines: stdin->stream and stream->stdout. Either side closing
-// terminates the proxy.
+// authenticateRemoteStream sends AUTH on an open Forward stream and
+// waits for OK\n. Returns a typed error on DENIED or EOF so the caller
+// can include the result in shutdown logging.
+func authenticateRemoteStream(stream pb.NodeAgent_ForwardClient, authToken string) error {
+	if authToken == "" {
+		return nil
+	}
+	if err := stream.Send(&pb.ForwardChunk{Data: []byte("AUTH " + authToken + "\n")}); err != nil {
+		return fmt.Errorf("send AUTH: %w", err)
+	}
+	return readAuthResp(stream)
+}
+
+// readAuthResp reads ForwardChunk{Data:...} frames from the stream until
+// it has seen a complete OK\n or DENIED\n line, then returns. Anything
+// other than OK is reported as an error. The first complete line MUST
+// fit in the first response frame — the gokd-mcp server side writes the
+// response in a single Write so this is safe in practice.
+func readAuthResp(stream pb.NodeAgent_ForwardClient) error {
+	var buf bytes.Buffer
+	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			return fmt.Errorf("recv auth resp: %w", err)
+		}
+		if len(msg.Data) > 0 {
+			buf.Write(msg.Data)
+		}
+		if msg.Close {
+			return errors.New("remote closed before AUTH response")
+		}
+		if idx := bytes.IndexByte(buf.Bytes(), '\n'); idx >= 0 {
+			line := strings.TrimRight(buf.String()[:idx+1], "\r\n")
+			switch line {
+			case "OK":
+				return nil
+			case "DENIED":
+				return errors.New("remote gokd-mcp denied AUTH")
+			default:
+				return fmt.Errorf("unexpected AUTH response %q", line)
+			}
+		}
+	}
+}
+
+// shuttleStdio bridges the local stdin/stdout with the Forward stream.
+// Runs two goroutines: stdin->stream and stream->stdout. Either side
+// closing terminates the proxy.
 func shuttleStdio(stream pb.NodeAgent_ForwardClient, logf func(string, ...any)) error {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -296,114 +524,6 @@ func shuttleStdio(stream pb.NodeAgent_ForwardClient, logf func(string, ...any)) 
 			logf("shuttle: %v", err)
 			return err
 		}
-	}
-	return nil
-}
-
-// --- agent helpers -----------------------------------------------------------
-
-func remoteRun(ctx context.Context, client pb.NodeAgentClient, command string, timeoutSec int) (string, int, int, error) {
-	stream, err := client.Execute(ctx, &pb.ExecuteRequest{
-		Command:        command,
-		Shell:          "powershell",
-		TimeoutSeconds: int32(timeoutSec),
-	})
-	if err != nil {
-		return "", -1, 0, err
-	}
-	var stdout strings.Builder
-	var exitCode int
-	var pid int
-	for {
-		msg, rerr := stream.Recv()
-		if rerr != nil {
-			if errors.Is(rerr, io.EOF) {
-				break
-			}
-			return stdout.String(), exitCode, pid, rerr
-		}
-		if len(msg.Data) > 0 {
-			stdout.Write(msg.Data)
-		}
-		if msg.Pid != 0 {
-			pid = int(msg.Pid)
-		}
-		if msg.Done {
-			exitCode = int(msg.ExitCode)
-		}
-	}
-	return stdout.String(), exitCode, pid, nil
-}
-
-func remoteHash(ctx context.Context, client pb.NodeAgentClient, path string) (string, error) {
-	cmd := fmt.Sprintf(`if (Test-Path '%s') { (Get-FileHash -Algorithm SHA256 '%s').Hash.ToLower() }`, path, path)
-	out, code, _, err := remoteRun(ctx, client, cmd, 30)
-	if err != nil || code != 0 {
-		return "", fmt.Errorf("remote hash exit=%d: %w", code, err)
-	}
-	return strings.TrimSpace(out), nil
-}
-
-func sha256File(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-func pushFile(ctx context.Context, client pb.NodeAgentClient, local, remote string) error {
-	f, err := os.Open(local)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return err
-	}
-
-	stream, err := client.PushFile(ctx)
-	if err != nil {
-		return err
-	}
-
-	const chunk = 64 * 1024
-	buf := make([]byte, chunk)
-	first := true
-	sentLast := false
-	for !sentLast {
-		n, rerr := f.Read(buf)
-		// Send a frame if we have bytes OR we still need to mark the end.
-		if n > 0 || rerr != nil {
-			req := &pb.PushFileRequest{}
-			if n > 0 {
-				req.Chunk = append([]byte(nil), buf[:n]...)
-			}
-			if first {
-				req.RemotePath = remote
-				req.FileSize = info.Size()
-				first = false
-			}
-			if rerr != nil {
-				if !errors.Is(rerr, io.EOF) {
-					return rerr
-				}
-				req.IsLast = true
-				sentLast = true
-			}
-			if serr := stream.Send(req); serr != nil {
-				return serr
-			}
-		}
-	}
-	if _, err := stream.CloseAndRecv(); err != nil {
-		return err
 	}
 	return nil
 }
