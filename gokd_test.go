@@ -93,6 +93,31 @@ func TestModules(t *testing.T) {
 	}
 }
 
+func TestExecuteCapturesOutput(t *testing.T) {
+	pid, cleanup := launchNotepad(t)
+	defer cleanup()
+
+	sess, err := gokd.New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer sess.Close()
+
+	if err := sess.AttachProcess(pid, gokd.AttachDefault); err != nil {
+		t.Fatalf("AttachProcess failed: %v", err)
+	}
+	defer sess.Detach()
+
+	out, err := sess.Execute("version")
+	if err != nil {
+		t.Fatalf("Execute(version) failed: %v", err)
+	}
+	if len(out) == 0 {
+		t.Fatal("Execute(version) returned empty output")
+	}
+	t.Logf("Execute(version) output (%d bytes):\n%s", len(out), out)
+}
+
 func TestSessionDoubleClose(t *testing.T) {
 	sess, err := gokd.New()
 	if err != nil {

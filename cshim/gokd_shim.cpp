@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <string>
 
 #include "gokd_internal.h"
 
@@ -1257,42 +1258,65 @@ extern "C" void gokd_set_output_callback(gokd_session_t handle,
 extern "C" int32_t gokd_execute(gokd_session_t handle, const char *cmd,
                                  char *out, size_t out_len) {
     S;
-    /*
-     * We temporarily capture the output into a buffer by using the output
-     * callbacks. The current output callback is saved and restored.
-     */
 
-    /* Execute the command. Output goes to our registered output callback. */
     wchar_t *wcmd = utf8_to_wide(cmd);
     if (!wcmd) return E_OUTOFMEMORY;
 
-    /* We need to capture output. Use a temporary output buffer approach:
-     * set a flag on the session to capture output into a buffer. */
-    HRESULT hr;
+    if (out && out_len > 0) out[0] = '\0';
 
-    if (out && out_len > 0) {
-        out[0] = '\0';
+    /* Per-call output capture: install a private IDebugOutputCallbacksWide
+     * that accumulates into a std::wstring, run ExecuteWide, then restore
+     * the previous callback. ExecuteWide returns its output exclusively
+     * through the registered output callback — capturing here means the
+     * caller gets it via the return value AND any GokdOutputCallbacks
+     * channel feed is suppressed for the duration of this call (which is
+     * the right behaviour: the caller is taking ownership of the output). */
+    class OutputCapture : public IDebugOutputCallbacksWide {
+    public:
+        std::wstring buf;
+        ULONG refcount = 1;
+        STDMETHOD_(ULONG, AddRef)() { return ++refcount; }
+        STDMETHOD_(ULONG, Release)() {
+            ULONG r = --refcount;
+            /* Stack-allocated — never delete. */
+            return r;
+        }
+        STDMETHOD(QueryInterface)(REFIID iid, PVOID *ppv) {
+            if (IsEqualIID(iid, __uuidof(IUnknown)) ||
+                IsEqualIID(iid, __uuidof(IDebugOutputCallbacksWide))) {
+                *ppv = static_cast<IDebugOutputCallbacksWide *>(this);
+                AddRef();
+                return S_OK;
+            }
+            *ppv = nullptr;
+            return E_NOINTERFACE;
+        }
+        STDMETHOD(Output)(ULONG /*mask*/, PCWSTR text) {
+            if (text) buf.append(text);
+            return S_OK;
+        }
+    };
 
-        /* Use OutputWide with a capture mechanism. For simplicity,
-         * execute with OUTCTL to capture to our output callback,
-         * then the Go side reads from the output channel. */
-        
-            hr = s->control->ExecuteWide(
-                DEBUG_OUTCTL_ALL_CLIENTS, wcmd, DEBUG_EXECUTE_DEFAULT);
-    
+    IDebugOutputCallbacksWide *prev = nullptr;
+    s->client->GetOutputCallbacksWide(&prev);
 
-        /* For captured output, we'd need the output callback to accumulate
-         * into a buffer. For now, this sends output through the output
-         * callback and the Go side collects it via the Output() channel.
-         * The `out` parameter will contain a note about this. */
-    } else {
-        
-            hr = s->control->ExecuteWide(
-                DEBUG_OUTCTL_ALL_CLIENTS, wcmd, DEBUG_EXECUTE_DEFAULT);
-    
-    }
+    OutputCapture cap;
+    s->client->SetOutputCallbacksWide(&cap);
+
+    HRESULT hr = s->control->ExecuteWide(
+        DEBUG_OUTCTL_THIS_CLIENT | DEBUG_OUTCTL_OVERRIDE_MASK |
+            DEBUG_OUTCTL_NOT_LOGGED,
+        wcmd, DEBUG_EXECUTE_DEFAULT);
+
+    /* Restore the previous callback unconditionally, even on failure. */
+    s->client->SetOutputCallbacksWide(prev);
 
     free(wcmd);
+
+    if (out && out_len > 0) {
+        wide_to_utf8_fixed(cap.buf.c_str(), out, out_len);
+    }
+
     SET_LAST_ERROR(hr);
     return hr;
 }
