@@ -294,7 +294,8 @@ public:
                 if (buf) {
                     WideCharToMultiByte(CP_UTF8, 0, text, -1,
                                         buf, len, NULL, NULL);
-                    sess->output_fn(mask, buf, sess->output_ctx);
+                    sess->output_fn((gokd_session_t)(uintptr_t)sess,
+                                    mask, buf, sess->output_ctx);
                     free(buf);
                 }
             }

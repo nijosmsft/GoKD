@@ -7,7 +7,8 @@ package dbgcgo
 // Note: CGo exports do not support const qualifiers, so we use non-const here.
 extern void goEventCallback(gokd_session_t s, int event_type,
                              void *event_data, void *ctx);
-extern void goOutputCallback(uint32_t mask, char *text, void *ctx);
+extern void goOutputCallback(gokd_session_t s, uint32_t mask,
+                              char *text, void *ctx);
 */
 import "C"
 
@@ -227,18 +228,18 @@ func goEventCallback(s C.gokd_session_t, eventType C.int,
 }
 
 //export goOutputCallback
-func goOutputCallback(mask C.uint32_t, text *C.char, ctx unsafe.Pointer) {
-	// The session handle is not passed directly to the output callback.
-	// We broadcast to all sessions. For multi-session support this
-	// would need refinement, but single-session is the common case.
+func goOutputCallback(s C.gokd_session_t, mask C.uint32_t, text *C.char, ctx unsafe.Pointer) {
+	// Route output to the specific subscriber for this session.
 	cbMu.RLock()
 	defer cbMu.RUnlock()
+	ch, ok := outputChans[s]
+	if !ok || ch == nil {
+		return
+	}
 	goText := C.GoString(text)
-	for _, ch := range outputChans {
-		select {
-		case ch <- goText:
-		default:
-		}
+	select {
+	case ch <- goText:
+	default:
 	}
 }
 

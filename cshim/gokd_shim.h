@@ -196,7 +196,8 @@ typedef void (*gokd_event_fn)(gokd_session_t s, int event_type,
                                const void *event_data, void *ctx);
 
 /* Output callback: fired from the dispatch thread. */
-typedef void (*gokd_output_fn)(uint32_t mask, const char *text, void *ctx);
+typedef void (*gokd_output_fn)(gokd_session_t s, uint32_t mask,
+                                const char *text, void *ctx);
 
 /* ====================================================================== */
 /*  Session lifecycle                                                     */
