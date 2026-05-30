@@ -80,7 +80,9 @@ func TestReadonlyUnsafeRawRegistersExecuteRaw(t *testing.T) {
 }
 
 func TestDefaultRegistersEverything(t *testing.T) {
-	s := &srv{sess: &stubSession{}}
+	// Set lablinkEnabled so the t4-1/t4-2 composite tools (which are also
+	// in mutatingTools) are registered and discoverable in this test.
+	s := &srv{sess: &stubSession{}, lablinkEnabled: true}
 	got := listToolNames(t, s)
 
 	for name := range mutatingTools {

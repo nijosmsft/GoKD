@@ -43,6 +43,7 @@ var mutatingTools = map[string]bool{
 	"reload_symbols":             true,
 	"sym_fix":                    true,
 	"write_dump":                 true,
+	"setup_kernel_debug":         true,
 }
 
 // addToolMaybe registers a tool unless the server is in readonly mode and

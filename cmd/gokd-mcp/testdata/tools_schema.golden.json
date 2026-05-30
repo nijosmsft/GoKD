@@ -371,6 +371,15 @@
       }
     },
     {
+      "name": "pull_latest_minidump",
+      "description": "Fetches the most recent crash dump from a lablink node, copies it locally, and optionally opens it in the local engine. source defaults to 'minidump' (C:\\Windows\\Minidump\\*.dmp); set 'crashdumps' for C:\\Windows\\LiveKernelReports\\*.dmp. Returns found=false when no dump exists. Refuses files larger than max_bytes (default 1 GiB). When open_locally=true, also surfaces bug_check and last_exception in the summary.",
+      "input_schema_sha256": "sha256:68bfbed916db8080df4d063f82bdd7de9fd0eb9369218cdc3d18d1e129a7c5c7",
+      "output_schema_sha256": "sha256:f49649e874fc705089b7088eceaf1ef267a8d71ddcc2942068713707a611e541",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
       "name": "query_region",
       "description": "Returns the MEMORY_BASIC_INFORMATION64 record covering va_hex via IDebugDataSpaces4::QueryVirtual. Fields use raw Windows numerics: state (MEM_COMMIT=0x1000, MEM_RESERVE=0x2000, MEM_FREE=0x10000), type (MEM_PRIVATE=0x20000, MEM_MAPPED=0x40000, MEM_IMAGE=0x1000000), protect (PAGE_* flags).",
       "input_schema_sha256": "sha256:a732678f1cbf8b576a3491764242cf417998fe923e1ed279680611af2a64a4bd",
@@ -474,6 +483,15 @@
       "description": "Switches the engine's current thread by system thread ID. Affects what get_stack and get_registers return. Requires the target to be broken in.",
       "input_schema_sha256": "sha256:06856a775081222827a8678382dab894c11b58a172bc20c6de91958fcd276aa6",
       "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "setup_kernel_debug",
+      "description": "Configures a remote lablink node for KDNET kernel debugging and reboots it. Runs 'bcdedit /dbgsettings net hostip:HOST port:PORT key:KEY' and 'bcdedit /debug on' on the node, reboots it, then waits up to timeout_seconds (default 300) for it to come back. REQUIRES confirm_reboot=true. Returns a connection_string suitable for attach_kernel. If attach_after=true and host is local to this gokd-mcp, the local engine is attached automatically.",
+      "input_schema_sha256": "sha256:b5cddb1917637225dfbdf6e22d93fcb373a06a6cdf17052fd843798fda62ac4c",
+      "output_schema_sha256": "sha256:428e47e5780fcf903ad0548543ee5a3b1e972e4b1ca4412acd43dc8fd930f852",
       "annotations": {
         "destructive_hint": true
       }

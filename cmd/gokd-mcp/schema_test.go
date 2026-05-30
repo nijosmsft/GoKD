@@ -197,7 +197,13 @@ func firstDiff(a, b string) string {
 func newTestServer(t *testing.T) *mcp.Server {
 	t.Helper()
 	server := mcp.NewServer(&mcp.Implementation{Name: "gokd-mcp", Version: "test"}, nil)
-	registerTools(server, newSrv(&stubSession{}, false, false))
+	s := newSrv(&stubSession{}, false, false)
+	// Register the composite tools too so the schema golden / description
+	// style tests cover them. The lablinkClient is intentionally left nil:
+	// the handlers reject calls with a clear error in that state, but the
+	// schemas are visible to ListTools.
+	s.lablinkEnabled = true
+	registerTools(server, s)
 	return server
 }
 

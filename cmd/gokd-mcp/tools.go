@@ -67,6 +67,16 @@ type srv struct {
 	// Last known target lifecycle marker, kept up to date by the drainer
 	// as events flow through pushEvent.
 	status *sessionStatus
+
+	// Lablink composite-tool wiring (t4-1, t4-2). lablinkEnabled gates
+	// registration of setup_kernel_debug / pull_latest_minidump in
+	// registerTools, so they only appear in tools/list when -lablink-enabled
+	// (or GOKD_MCP_LABLINK=1) is set. lablink is the shared, lazily-dialed
+	// agent pool — nil when lablinkEnabled is false. Production code sets
+	// both via newSrv → main.go; tests can set lablinkEnabled directly to
+	// snapshot the composite tools' schemas without dialing a real pool.
+	lablinkEnabled bool
+	lablink        *lablinkClient
 }
 
 // newSrv constructs an srv with all Tier 2 plumbing wired up. Tests that
@@ -606,6 +616,16 @@ func registerTools(server *mcp.Server, s *srv) {
 
 	// --- t1-7 dump type ---
 	addToolMaybe(s, server, &mcp.Tool{Name: "dump_type", Description: "Walks a typed object recursively (the 'dt -r' surface). Resolves type in module's symbol namespace, reads address_hex as that type, and recurses into struct fields up to max_depth levels (default 3). follow_ptrs dereferences non-NULL pointer fields one extra level with cycle detection. Special decoders surface _UNICODE_STRING (string), _LIST_ENTRY, GUID, _LARGE_INTEGER."}, s.dumpType)
+
+	// --- t4-1 / t4-2 lablink-backed composite tools ---
+	// Both gated by -lablink-enabled (env GOKD_MCP_LABLINK). Default off so
+	// installations without a lablink registry do not advertise tools that
+	// cannot work. setup_kernel_debug is destructive (mutatingTools) so it
+	// is additionally suppressed under --readonly via addToolMaybe.
+	if s.lablinkEnabled {
+		addToolMaybe(s, server, &mcp.Tool{Name: "setup_kernel_debug", Description: "Configures a remote lablink node for KDNET kernel debugging and reboots it. Runs 'bcdedit /dbgsettings net hostip:HOST port:PORT key:KEY' and 'bcdedit /debug on' on the node, reboots it, then waits up to timeout_seconds (default 300) for it to come back. REQUIRES confirm_reboot=true. Returns a connection_string suitable for attach_kernel. If attach_after=true and host is local to this gokd-mcp, the local engine is attached automatically."}, s.setupKernelDebug)
+		addToolMaybe(s, server, &mcp.Tool{Name: "pull_latest_minidump", Description: "Fetches the most recent crash dump from a lablink node, copies it locally, and optionally opens it in the local engine. source defaults to 'minidump' (C:\\Windows\\Minidump\\*.dmp); set 'crashdumps' for C:\\Windows\\LiveKernelReports\\*.dmp. Returns found=false when no dump exists. Refuses files larger than max_bytes (default 1 GiB). When open_locally=true, also surfaces bug_check and last_exception in the summary."}, s.pullLatestMinidump)
+	}
 
 	registerPrompts(server)
 }

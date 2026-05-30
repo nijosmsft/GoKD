@@ -99,6 +99,8 @@ var opHints = map[string][]string{
 	"get_raw_output_continuation": {"execute_raw"},
 	"get_recent_events":           {"get_session_state"},
 	"get_recent_output":           {"get_session_state"},
+	"setup_kernel_debug":          {"attach_kernel", "get_session_state"},
+	"pull_latest_minidump":        {"open_dump", "triage_crash"},
 }
 
 // wrapErr converts an arbitrary error from a gokd Session call into a

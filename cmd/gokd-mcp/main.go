@@ -24,15 +24,16 @@ import (
 )
 
 type config struct {
-	symbols   string
-	logPath   string
-	logLevel  string
-	logJSON   bool
-	listen    string
-	remote    string
-	authToken string
-	readonly  bool
-	unsafeRaw bool
+	symbols        string
+	logPath        string
+	logLevel       string
+	logJSON        bool
+	listen         string
+	remote         string
+	authToken      string
+	readonly       bool
+	unsafeRaw      bool
+	lablinkEnabled bool
 }
 
 func main() {
@@ -78,6 +79,18 @@ func main() {
 	}()
 
 	state := newSrv(sess, cfg.readonly, cfg.unsafeRaw)
+	if cfg.lablinkEnabled {
+		// lablinkClient is lazy: we construct it but defer registry +
+		// transport resolution to the first composite-tool invocation, so
+		// boot still works without LABLINK_AGENT_TOKEN if the operator
+		// never calls one of the gated tools.
+		llLog := func(format string, args ...any) {
+			logger.Info(fmt.Sprintf("lablink: "+format, args...))
+		}
+		state.lablink = newLablinkClient(llLog)
+		state.lablinkEnabled = true
+		defer state.lablink.close()
+	}
 	drain := newDrainer(state, logger)
 	drain.run(sess)
 
@@ -122,6 +135,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.authToken, "auth-token", envOr("GOKD_MCP_AUTH_TOKEN", ""), "require -listen clients to present this token via 'AUTH <token>\\n' before MCP starts. Min 16 chars, no whitespace. Empty (default) disables auth.")
 	flag.BoolVar(&cfg.readonly, "readonly", false, "reject any tool that can modify the target (writes, breakpoints, execution)")
 	flag.BoolVar(&cfg.unsafeRaw, "unsafe-raw", false, "with --readonly, allow execute_raw but enforce a command denylist")
+	flag.BoolVar(&cfg.lablinkEnabled, "lablink-enabled", envBool("GOKD_MCP_LABLINK", false), "register lablink-backed composite tools (setup_kernel_debug, pull_latest_minidump). Requires LABLINK_AGENT_TOKEN + nodes.json (env: GOKD_MCP_LABLINK)")
 	flag.Parse()
 	if cfg.authToken != "" {
 		if strings.ContainsAny(cfg.authToken, "\r\n \t") {
