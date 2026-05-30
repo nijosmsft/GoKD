@@ -32,6 +32,11 @@ import (
 // Close has been called. Re-exported from the internal dbgcgo package.
 var ErrSessionClosed = dbgcgo.ErrSessionClosed
 
+// ErrTimeout is returned when an internal WaitForEvent call hits its
+// overall timeout (DbgEng's S_FALSE). Use errors.Is(err, ErrTimeout)
+// to distinguish a benign wait timeout from a hard failure.
+var ErrTimeout = dbgcgo.ErrTimeout
+
 // Session is the top-level handle to a debug session.
 // All methods are safe to call from any goroutine.
 type Session interface {

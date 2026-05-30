@@ -124,12 +124,40 @@ func (s *Session) exec(fn func()) error {
 	return nil
 }
 
-// hresult converts a C int32_t HRESULT to a Go error (nil if S_OK).
+// HRESULTError wraps a non-success HRESULT value. It implements the
+// error interface; the formatted form is "HRESULT 0x%08x". Callers can
+// distinguish well-known sentinels via errors.Is — see ErrTimeout.
+type HRESULTError int32
+
+// Error implements the error interface.
+func (h HRESULTError) Error() string {
+	return fmt.Sprintf("HRESULT 0x%08x", uint32(h))
+}
+
+// HRESULT returns the raw 32-bit HRESULT value.
+func (h HRESULTError) HRESULT() int32 { return int32(h) }
+
+// ErrTimeout indicates a WaitForEvent overall-timeout. Internally the
+// shim returns S_FALSE (0x00000001) for this case; without an explicit
+// sentinel the old hresult() silently returned nil and the dispatch
+// thread looked like it had completed successfully — every downstream
+// call then failed with E_UNEXPECTED.
+var ErrTimeout = HRESULTError(0x1)
+
+// hresult converts a C int32_t HRESULT to a Go error.
+//   S_OK (0)      → nil
+//   S_FALSE (1)   → ErrTimeout
+//   any other hr  → HRESULTError(hr) (covers both other "success"-coded
+//                   informational HRESULTs and hard failures).
 func hresult(hr C.int32_t) error {
-	if hr >= 0 {
+	switch hr {
+	case 0:
 		return nil
+	case 1:
+		return ErrTimeout
+	default:
+		return HRESULTError(hr)
 	}
-	return fmt.Errorf("HRESULT 0x%08x", uint32(hr))
 }
 
 // ── Attach ────────────────────────────────────────────────────────────
