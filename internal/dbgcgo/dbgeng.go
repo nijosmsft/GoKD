@@ -144,10 +144,21 @@ func (h HRESULTError) HRESULT() int32 { return int32(h) }
 // call then failed with E_UNEXPECTED.
 var ErrTimeout = HRESULTError(0x1)
 
+// ErrNotFound indicates a lookup that the underlying DbgEng call could
+// not satisfy — e.g. source-line info that is missing, or a memory
+// search that found no match. The shim maps several DbgEng failure
+// codes (E_FAIL, E_NOTIMPL, 0x80070490, 0xD0000225) onto this single
+// 0x80000002 (E_NOTFOUND) value so callers can branch with
+// errors.Is(err, ErrNotFound).
+//
+//nolint:gochecknoglobals
+var ErrNotFound = HRESULTError(-0x7FFFFFFE) // 0x80000002
+
 // hresult converts a C int32_t HRESULT to a Go error.
 //
 //	S_OK (0)      → nil
 //	S_FALSE (1)   → ErrTimeout
+//	0x80000002    → ErrNotFound
 //	any other hr  → HRESULTError(hr) (covers both other "success"-coded
 //	                informational HRESULTs and hard failures).
 func hresult(hr C.int32_t) error {
@@ -156,6 +167,8 @@ func hresult(hr C.int32_t) error {
 		return nil
 	case 1:
 		return ErrTimeout
+	case -0x7FFFFFFE: // 0x80000002
+		return ErrNotFound
 	default:
 		return HRESULTError(hr)
 	}
@@ -492,6 +505,67 @@ func (s *Session) ReloadSymbols(spec string) error {
 		hr = C.gokd_reload_symbols(s.handle, cspec)
 	})
 	return hresult(hr)
+}
+
+// ── Source lines (t1-3) ──────────────────────────────────────────────
+
+// SourceLine mirrors the file/line/displacement triple returned by
+// IDebugSymbols3::GetLineByOffsetWide.
+type SourceLine struct {
+	File         string
+	Line         uint32
+	Displacement uint64
+}
+
+// AddrToLine maps an instruction address to a (file, line, displacement)
+// tuple. Returns ErrNotFound when no line info is loaded for that address.
+func (s *Session) AddrToLine(address uint64) (SourceLine, error) {
+	var out SourceLine
+	var line C.uint32_t
+	var disp C.uint64_t
+	var needed C.uint32_t
+	var hr C.int32_t
+	s.exec(func() {
+		hr = C.gokd_addr_to_line(s.handle, C.uint64_t(address),
+			&line, &disp, nil, 0, &needed)
+	})
+	if err := hresult(hr); err != nil {
+		return out, err
+	}
+	out.Line = uint32(line)
+	out.Displacement = uint64(disp)
+	if needed > 1 {
+		buf := make([]byte, int(needed))
+		s.exec(func() {
+			hr = C.gokd_addr_to_line(s.handle, C.uint64_t(address),
+				&line, &disp,
+				(*C.char)(unsafe.Pointer(&buf[0])),
+				C.uint32_t(len(buf)), &needed)
+		})
+		if err := hresult(hr); err != nil {
+			return out, err
+		}
+		n := 0
+		for n < len(buf) && buf[n] != 0 {
+			n++
+		}
+		out.File = string(buf[:n])
+	}
+	return out, nil
+}
+
+// LineToAddr maps a (file, line) pair to an instruction address. The
+// file path must match the canonical absolute path that DbgEng stores
+// in the loaded PDB; partial matches fail with ErrNotFound.
+func (s *Session) LineToAddr(file string, line uint32) (uint64, error) {
+	var addr C.uint64_t
+	var hr C.int32_t
+	s.exec(func() {
+		cfile := C.CString(file)
+		defer C.free(unsafe.Pointer(cfile))
+		hr = C.gokd_line_to_addr(s.handle, C.uint32_t(line), cfile, &addr)
+	})
+	return uint64(addr), hresult(hr)
 }
 
 // ── Types ─────────────────────────────────────────────────────────────

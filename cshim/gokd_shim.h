@@ -425,6 +425,37 @@ int32_t gokd_get_symbol_path(gokd_session_t s, char *out, size_t len);
 int32_t gokd_reload_symbols(gokd_session_t s, const char *spec);
 
 /* ====================================================================== */
+/*  Source lines (t1-3)                                                   */
+/* ====================================================================== */
+
+/*
+ * Map an address to a source file/line via IDebugSymbols3::GetLineByOffsetWide.
+ * Count-then-fetch for the file path: pass file_buf=NULL to get the required
+ * UTF-8 byte count (including NUL) in *needed; then call again with a buffer
+ * of that size. out_line and out_displacement are always populated on success.
+ *
+ * Returns E_NOTFOUND when DbgEng reports no line info for the address (E_FAIL
+ * or E_NOTIMPL get remapped). Go-side surfaces this as ErrNotFound.
+ */
+int32_t gokd_addr_to_line(gokd_session_t s,
+                           uint64_t address,
+                           uint32_t *out_line,
+                           uint64_t *out_displacement,
+                           char *file_buf,
+                           uint32_t cap,
+                           uint32_t *needed);
+
+/*
+ * Map a (file, line) pair to an address via IDebugSymbols3::GetOffsetByLineWide.
+ * The path must match the one DbgEng holds in its PDB (typically a full
+ * absolute build-machine path); partial matches fail with E_NOTFOUND.
+ */
+int32_t gokd_line_to_addr(gokd_session_t s,
+                           uint32_t line,
+                           const char *file_utf8,
+                           uint64_t *out_address);
+
+/* ====================================================================== */
 /*  Types (via DbgHelp, resolved locally)                                 */
 /* ====================================================================== */
 

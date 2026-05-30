@@ -37,6 +37,13 @@ var ErrSessionClosed = dbgcgo.ErrSessionClosed
 // to distinguish a benign wait timeout from a hard failure.
 var ErrTimeout = dbgcgo.ErrTimeout
 
+// ErrNotFound is returned when a lookup that the underlying DbgEng call
+// could not satisfy — e.g. source-line info that is missing for an
+// address, an unresolved (file, line) pair, or a memory search that
+// found no match. Use errors.Is(err, ErrNotFound) to distinguish a
+// benign "no result" from a hard failure.
+var ErrNotFound = dbgcgo.ErrNotFound
+
 // Session is the top-level handle to a debug session.
 // All methods are safe to call from any goroutine.
 type Session interface {
@@ -114,9 +121,9 @@ type Session interface {
 	// Evaluate parses an expression in the current expression syntax
 	// (MASM by default) and returns the typed result. desired may be
 	// ValueInvalid to ask for the engine's natural type. The remainder
-	// is the byte index into expr where the parser stopped; 0 means the
-	// whole expression was consumed. Symbol resolution may stall on
-	// PDB downloads — use ctx to bound the wait.
+	// is the number of wide characters left unconsumed at the end of
+	// expr; 0 means the parser consumed the entire input. Symbol
+	// resolution may stall on PDB downloads — use ctx to bound the wait.
 	//
 	// Expressions like MyClass::Method require ExpressionSyntaxCPP;
 	// the default MASM parser will reject them with E_INVALIDARG.
@@ -125,6 +132,15 @@ type Session interface {
 	SetRadix(r uint32) error
 	ExpressionSyntax() (ExpressionSyntax, error)
 	SetExpressionSyntax(syn ExpressionSyntax) error
+
+	// Source lines (t1-3). AddrToLine maps an instruction address to a
+	// (file, line, displacement) tuple; LineToAddr does the reverse.
+	// AddBreakpointSourceLine resolves (file, line) to an address and
+	// installs a code breakpoint there. All three return ErrNotFound
+	// when DbgEng has no line info loaded for the location.
+	AddrToLine(address uint64) (SourceLine, error)
+	LineToAddr(file string, line uint32) (uint64, error)
+	AddBreakpointSourceLine(file string, line uint32) (*Breakpoint, error)
 
 	// Async streams
 	Events() <-chan Event
@@ -524,6 +540,10 @@ func (e ExpressionSyntax) String() string {
 		return fmt.Sprintf("ExpressionSyntax(%d)", uint32(e))
 	}
 }
+
+// SourceLine is the (file, line, displacement) triple returned by
+// AddrToLine.
+type SourceLine = dbgcgo.SourceLine
 
 // Event types delivered on Session.Events().
 type Event interface{ isEvent() }
@@ -1010,6 +1030,27 @@ func (s *session) SetExpressionSyntax(syn ExpressionSyntax) error {
 		return fmt.Errorf("gokd: unknown ExpressionSyntax(%d)", uint32(syn))
 	}
 	return s.inner.SetExpressionSyntax(name)
+}
+
+// --- Source lines (t1-3) ---
+
+func (s *session) AddrToLine(address uint64) (SourceLine, error) {
+	return s.inner.AddrToLine(address)
+}
+
+func (s *session) LineToAddr(file string, line uint32) (uint64, error) {
+	if file == "" {
+		return 0, fmt.Errorf("gokd: file is required")
+	}
+	return s.inner.LineToAddr(file, line)
+}
+
+func (s *session) AddBreakpointSourceLine(file string, line uint32) (*Breakpoint, error) {
+	addr, err := s.LineToAddr(file, line)
+	if err != nil {
+		return nil, err
+	}
+	return s.AddBreakpoint(addr)
 }
 
 func (s *session) Events() <-chan Event {

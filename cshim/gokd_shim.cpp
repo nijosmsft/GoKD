@@ -733,6 +733,107 @@ extern "C" int32_t gokd_reload_symbols(gokd_session_t handle,
 }
 
 /* ====================================================================== */
+/*  Source lines (t1-3)                                                   */
+/* ====================================================================== */
+
+#ifndef GOKD_E_NOTFOUND
+#define GOKD_E_NOTFOUND ((int32_t)0x80000002)
+#endif
+
+/* Map DbgEng "no line info available" failure codes onto a single E_NOTFOUND
+ * sentinel that Go can surface as ErrNotFound. */
+static int32_t map_srcline_hr(HRESULT hr) {
+    if (hr == E_FAIL || hr == E_NOTIMPL) return GOKD_E_NOTFOUND;
+    return hr;
+}
+
+extern "C" int32_t gokd_addr_to_line(gokd_session_t handle,
+                                      uint64_t address,
+                                      uint32_t *out_line,
+                                      uint64_t *out_displacement,
+                                      char *file_buf,
+                                      uint32_t cap,
+                                      uint32_t *needed) {
+    S;
+    if (!out_line) return E_INVALIDARG;
+
+    ULONG line = 0;
+    ULONG file_size_wide = 0;
+    ULONG64 displacement = 0;
+
+    HRESULT hr = s->symbols->GetLineByOffsetWide(
+        (ULONG64)address, &line, NULL, 0, &file_size_wide, &displacement);
+    /* Some DbgEng builds return S_FALSE when the buffer is too small and
+     * still set FileSize; treat that as success for sizing purposes. */
+    if (hr != S_OK && hr != S_FALSE) {
+        int32_t mapped = map_srcline_hr(hr);
+        SET_LAST_ERROR(mapped);
+        return mapped;
+    }
+
+    *out_line = (uint32_t)line;
+    if (out_displacement) *out_displacement = (uint64_t)displacement;
+
+    /* file_size_wide includes the terminating NUL; if zero we have no file
+     * info even though DbgEng reports success — treat as not found. */
+    if (file_size_wide == 0) {
+        if (needed) *needed = 0;
+        if (file_buf && cap > 0) file_buf[0] = '\0';
+        return S_OK;
+    }
+
+    wchar_t *wbuf = (wchar_t *)malloc(file_size_wide * sizeof(wchar_t));
+    if (!wbuf) return E_OUTOFMEMORY;
+    ULONG actual_wide = 0;
+    hr = s->symbols->GetLineByOffsetWide(
+        (ULONG64)address, &line, wbuf, file_size_wide, &actual_wide,
+        &displacement);
+    if (FAILED(hr)) {
+        free(wbuf);
+        int32_t mapped = map_srcline_hr(hr);
+        SET_LAST_ERROR(mapped);
+        return mapped;
+    }
+
+    /* Compute UTF-8 byte count (including NUL) for sizing. */
+    int u8_len = WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, NULL, 0,
+                                      NULL, NULL);
+    if (u8_len <= 0) u8_len = 1;
+    if (needed) *needed = (uint32_t)u8_len;
+
+    if (file_buf && cap > 0) {
+        WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, file_buf, (int)cap,
+                            NULL, NULL);
+        file_buf[cap - 1] = '\0';
+    }
+    free(wbuf);
+    return S_OK;
+}
+
+extern "C" int32_t gokd_line_to_addr(gokd_session_t handle,
+                                      uint32_t line,
+                                      const char *file_utf8,
+                                      uint64_t *out_address) {
+    S;
+    if (!out_address || !file_utf8) return E_INVALIDARG;
+
+    wchar_t *wfile = utf8_to_wide(file_utf8);
+    if (!wfile) return E_OUTOFMEMORY;
+
+    ULONG64 offset = 0;
+    HRESULT hr = s->symbols->GetOffsetByLineWide((ULONG)line, wfile, &offset);
+    free(wfile);
+
+    if (SUCCEEDED(hr)) {
+        *out_address = (uint64_t)offset;
+        return S_OK;
+    }
+    int32_t mapped = map_srcline_hr(hr);
+    SET_LAST_ERROR(mapped);
+    return mapped;
+}
+
+/* ====================================================================== */
 /*  Types                                                                 */
 /* ====================================================================== */
 

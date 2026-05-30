@@ -221,6 +221,32 @@ type setExpressionSyntaxInput struct {
 	Syntax string `json:"syntax" jsonschema:"expression syntax to switch to (masm|cpp)"`
 }
 
+// --- t1-3 source lines ---
+
+type addrToLineInput struct {
+	AddressHex string `json:"address_hex" jsonschema:"instruction address as a hex string (with or without 0x prefix)"`
+}
+
+type addrToLineOutput struct {
+	File         string `json:"file"`
+	Line         uint32 `json:"line"`
+	Displacement uint64 `json:"displacement"`
+}
+
+type lineToAddrInput struct {
+	File string `json:"file" jsonschema:"absolute source path as stored in the PDB"`
+	Line uint32 `json:"line" jsonschema:"1-based source line"`
+}
+
+type lineToAddrOutput struct {
+	AddressHex string `json:"address_hex"`
+}
+
+type addBreakpointSourceLineInput struct {
+	File string `json:"file" jsonschema:"absolute source path as stored in the PDB"`
+	Line uint32 `json:"line" jsonschema:"1-based source line"`
+}
+
 func toolErr[Out any](err error) (*mcp.CallToolResult, Out, error) {
 	var zero Out
 	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, zero, nil
@@ -291,6 +317,11 @@ func registerTools(server *mcp.Server, s *srv) {
 	mcp.AddTool(server, &mcp.Tool{Name: "set_radix", Description: "Set the numeric radix used by evaluate and DbgEng formatting. Typical values: 10, 16."}, s.setRadix)
 	mcp.AddTool(server, &mcp.Tool{Name: "get_expression_syntax", Description: "Return the current expression-parser syntax ('masm' or 'cpp')."}, s.getExpressionSyntax)
 	mcp.AddTool(server, &mcp.Tool{Name: "set_expression_syntax", Description: "Switch the expression-parser syntax. Accepts 'masm' or 'cpp'. C++ is needed for scope-resolved names like MyClass::Method."}, s.setExpressionSyntax)
+
+	// --- t1-3 source lines ---
+	mcp.AddTool(server, &mcp.Tool{Name: "addr_to_line", Description: "Map an instruction address to its source (file, line, displacement) via IDebugSymbols3::GetLineByOffsetWide. Returns an error containing 'HRESULT 0x80000002' (E_NOTFOUND) when no line info is loaded for the address — install matching PDBs or run reload_symbols first."}, s.addrToLine)
+	mcp.AddTool(server, &mcp.Tool{Name: "line_to_addr", Description: "Map a (file, line) pair to an instruction address via IDebugSymbols3::GetOffsetByLineWide. The file path must be the canonical absolute path the PDB was built with; partial matches fail with E_NOTFOUND."}, s.lineToAddr)
+	mcp.AddTool(server, &mcp.Tool{Name: "add_breakpoint_source_line", Description: "Resolve a (file, line) pair to an address and install a code breakpoint there. Requires line-info PDBs for the target binary; otherwise fails with E_NOTFOUND."}, s.addBreakpointSourceLine)
 }
 
 func (s *srv) attachProcess(ctx context.Context, _ *mcp.CallToolRequest, in attachProcessInput) (*mcp.CallToolResult, okOutput, error) {
@@ -846,4 +877,59 @@ func (s *srv) setExpressionSyntax(ctx context.Context, _ *mcp.CallToolRequest, i
 		return toolErr[okOutput](err)
 	}
 	return nil, okOutput{OK: true}, nil
+}
+
+// --- t1-3 source lines ---
+
+func (s *srv) addrToLine(ctx context.Context, _ *mcp.CallToolRequest, in addrToLineInput) (*mcp.CallToolResult, addrToLineOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[addrToLineOutput](err)
+	}
+	addr, err := parseHexUint64(in.AddressHex, "address_hex")
+	if err != nil {
+		return toolErr[addrToLineOutput](err)
+	}
+	sl, err := s.sess.AddrToLine(addr)
+	if err != nil {
+		return toolErr[addrToLineOutput](err)
+	}
+	return nil, addrToLineOutput{File: sl.File, Line: sl.Line, Displacement: sl.Displacement}, nil
+}
+
+func (s *srv) lineToAddr(ctx context.Context, _ *mcp.CallToolRequest, in lineToAddrInput) (*mcp.CallToolResult, lineToAddrOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[lineToAddrOutput](err)
+	}
+	if strings.TrimSpace(in.File) == "" {
+		return toolErr[lineToAddrOutput](fmt.Errorf("file is required"))
+	}
+	if in.Line == 0 {
+		return toolErr[lineToAddrOutput](fmt.Errorf("line must be >= 1"))
+	}
+	addr, err := s.sess.LineToAddr(in.File, in.Line)
+	if err != nil {
+		return toolErr[lineToAddrOutput](err)
+	}
+	return nil, lineToAddrOutput{AddressHex: hex64(addr)}, nil
+}
+
+func (s *srv) addBreakpointSourceLine(ctx context.Context, _ *mcp.CallToolRequest, in addBreakpointSourceLineInput) (*mcp.CallToolResult, addBreakpointOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[addBreakpointOutput](err)
+	}
+	if strings.TrimSpace(in.File) == "" {
+		return toolErr[addBreakpointOutput](fmt.Errorf("file is required"))
+	}
+	if in.Line == 0 {
+		return toolErr[addBreakpointOutput](fmt.Errorf("line must be >= 1"))
+	}
+	bp, err := s.sess.AddBreakpointSourceLine(in.File, in.Line)
+	if err != nil {
+		return toolErr[addBreakpointOutput](err)
+	}
+	addr := uint64(0)
+	if bp != nil {
+		addr = bp.Address
+	}
+	return nil, addBreakpointOutput{ID: bp.ID, AddressHex: hex64(addr)}, nil
 }
