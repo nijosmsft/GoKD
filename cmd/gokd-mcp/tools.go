@@ -178,6 +178,17 @@ type executeRawOutput struct {
 	Output string `json:"output"`
 }
 
+// --- t1-4 symbol reload / status ---
+
+type reloadSymbolsInput struct {
+	Spec           string `json:"spec,omitempty" jsonschema:"reload spec forwarded verbatim to ReloadWide (for example \"/f\" or \"/f nt\"); empty reloads anything stale"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty" jsonschema:"timeout in seconds; 0 means no timeout"`
+}
+
+type symFixInput struct {
+	Cache string `json:"cache,omitempty" jsonschema:"optional local cache directory; empty uses a per-user default"`
+}
+
 func toolErr[Out any](err error) (*mcp.CallToolResult, Out, error) {
 	var zero Out
 	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, zero, nil
@@ -237,6 +248,10 @@ func registerTools(server *mcp.Server, s *srv) {
 	mcp.AddTool(server, &mcp.Tool{Name: "get_symbol_path", Description: "Get the current debugger symbol path."}, s.getSymbolPath)
 	mcp.AddTool(server, &mcp.Tool{Name: "set_symbol_path", Description: "Set the debugger symbol path."}, s.setSymbolPath)
 	mcp.AddTool(server, &mcp.Tool{Name: "execute_raw", Description: "WARNING: arbitrary dbgeng command. Use only when other tools are insufficient."}, s.executeRaw)
+
+	// --- t1-4 symbol reload / status ---
+	mcp.AddTool(server, &mcp.Tool{Name: "reload_symbols", Description: "Force a symbol reload via IDebugSymbols3::ReloadWide. Use when get_modules reports a deferred symbol_type or after changing set_symbol_path. spec is forwarded verbatim ('', '/f', '/f <module>'). May download from the symbol server — supply timeout_seconds (default 0 = no timeout) to bound the wait. Returns ok=true on success."}, s.reloadSymbols)
+	mcp.AddTool(server, &mcp.Tool{Name: "sym_fix", Description: "Configure the symbol path to the standard Microsoft public-symbol-server cache layout (mirrors WinDbg .symfix). Pass an optional cache directory; empty uses a per-user default. Returns ok=true. Follow with reload_symbols to actually pull PDBs."}, s.symFix)
 }
 
 func (s *srv) attachProcess(ctx context.Context, _ *mcp.CallToolRequest, in attachProcessInput) (*mcp.CallToolResult, okOutput, error) {
@@ -690,4 +705,28 @@ func (s *srv) executeRaw(ctx context.Context, _ *mcp.CallToolRequest, in execute
 		return toolErr[executeRawOutput](err)
 	}
 	return nil, executeRawOutput{Output: out}, nil
+}
+
+// --- t1-4 symbol reload / status ---
+
+func (s *srv) reloadSymbols(ctx context.Context, _ *mcp.CallToolRequest, in reloadSymbolsInput) (*mcp.CallToolResult, okOutput, error) {
+	ctx, cancel, err := contextWithSeconds(ctx, in.TimeoutSeconds)
+	if err != nil {
+		return toolErr[okOutput](err)
+	}
+	defer cancel()
+	if err := s.sess.ReloadSymbols(ctx, in.Spec); err != nil {
+		return toolErr[okOutput](err)
+	}
+	return nil, okOutput{OK: true}, nil
+}
+
+func (s *srv) symFix(ctx context.Context, _ *mcp.CallToolRequest, in symFixInput) (*mcp.CallToolResult, okOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[okOutput](err)
+	}
+	if err := s.sess.SymFix(in.Cache); err != nil {
+		return toolErr[okOutput](err)
+	}
+	return nil, okOutput{OK: true}, nil
 }

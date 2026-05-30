@@ -43,12 +43,13 @@ func registerTypeString(t gokd.RegisterType) string {
 }
 
 type Module struct {
-	Name      string `json:"name"`
-	ImageName string `json:"image_name,omitempty"`
-	BaseHex   string `json:"base_hex"`
-	Size      uint32 `json:"size"`
-	Timestamp uint32 `json:"timestamp"`
-	Checksum  uint32 `json:"checksum"`
+	Name       string `json:"name"`
+	ImageName  string `json:"image_name,omitempty"`
+	BaseHex    string `json:"base_hex"`
+	Size       uint32 `json:"size"`
+	Timestamp  uint32 `json:"timestamp"`
+	Checksum   uint32 `json:"checksum"`
+	SymbolType string `json:"symbol_type"`
 }
 
 type Thread struct {
@@ -112,7 +113,7 @@ type StopEvent struct {
 }
 
 func formatModule(m *gokd.Module) Module {
-	return Module{Name: m.Name, ImageName: m.ImageName, BaseHex: hex64(m.Base), Size: m.Size, Timestamp: m.Timestamp, Checksum: m.Checksum}
+	return Module{Name: m.Name, ImageName: m.ImageName, BaseHex: hex64(m.Base), Size: m.Size, Timestamp: m.Timestamp, Checksum: m.Checksum, SymbolType: gokd.SymbolTypeString(m.SymbolType)}
 }
 
 func formatThread(t *gokd.Thread) Thread {

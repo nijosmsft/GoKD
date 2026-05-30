@@ -76,7 +76,18 @@ typedef struct {
     uint32_t size;
     uint32_t timestamp;
     uint32_t checksum;
+    uint32_t symbol_type;     /* GOKD_SYMTYPE_* — DEBUG_MODULE_PARAMETERS::SymbolType */
 } gokd_module_t;
+
+/* Symbol type values mirror DEBUG_SYMTYPE_* in dbgeng.h. */
+#define GOKD_SYMTYPE_NONE     0
+#define GOKD_SYMTYPE_COFF     1
+#define GOKD_SYMTYPE_CODEVIEW 2
+#define GOKD_SYMTYPE_PDB      3
+#define GOKD_SYMTYPE_EXPORT   4
+#define GOKD_SYMTYPE_DEFERRED 5
+#define GOKD_SYMTYPE_SYM      6
+#define GOKD_SYMTYPE_DIA      7
 
 /* Thread */
 typedef struct {
@@ -369,6 +380,14 @@ int32_t gokd_addr_to_name(gokd_session_t s, uint64_t addr,
 
 int32_t gokd_set_symbol_path(gokd_session_t s, const char *path);
 int32_t gokd_get_symbol_path(gokd_session_t s, char *out, size_t len);
+
+/*
+ * Reload symbols. spec is passed verbatim to ReloadWide — empty string
+ * means "reload all that need it", "/f" forces a fresh download, "/f nt"
+ * targets a single module. May download from the symbol server and take
+ * a long time; route through execWithCancel from Go.
+ */
+int32_t gokd_reload_symbols(gokd_session_t s, const char *spec);
 
 /* ====================================================================== */
 /*  Types (via DbgHelp, resolved locally)                                 */

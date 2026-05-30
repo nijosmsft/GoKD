@@ -145,10 +145,11 @@ func (h HRESULTError) HRESULT() int32 { return int32(h) }
 var ErrTimeout = HRESULTError(0x1)
 
 // hresult converts a C int32_t HRESULT to a Go error.
-//   S_OK (0)      → nil
-//   S_FALSE (1)   → ErrTimeout
-//   any other hr  → HRESULTError(hr) (covers both other "success"-coded
-//                   informational HRESULTs and hard failures).
+//
+//	S_OK (0)      → nil
+//	S_FALSE (1)   → ErrTimeout
+//	any other hr  → HRESULTError(hr) (covers both other "success"-coded
+//	                informational HRESULTs and hard failures).
 func hresult(hr C.int32_t) error {
 	switch hr {
 	case 0:
@@ -242,19 +243,19 @@ func (s *Session) CancelWait() {
 
 // StopEvent mirrors gokd_stop_event_t.
 type StopEvent struct {
-	Reason              uint32
-	Address             uint64
-	ThreadSystemID      uint32
-	ExceptionCode       uint32
+	Reason               uint32
+	Address              uint64
+	ThreadSystemID       uint32
+	ExceptionCode        uint32
 	ExceptionFirstChance uint32
 }
 
 func stopEventFromC(cev C.gokd_stop_event_t) StopEvent {
 	return StopEvent{
-		Reason:              uint32(cev.reason),
-		Address:             uint64(cev.address),
-		ThreadSystemID:      uint32(cev.thread_sys_id),
-		ExceptionCode:       uint32(cev.exception_code),
+		Reason:               uint32(cev.reason),
+		Address:              uint64(cev.address),
+		ThreadSystemID:       uint32(cev.thread_sys_id),
+		ExceptionCode:        uint32(cev.exception_code),
 		ExceptionFirstChance: uint32(cev.exception_first_chance),
 	}
 }
@@ -479,6 +480,20 @@ func (s *Session) GetSymbolPath() (string, error) {
 	return C.GoString((*C.char)(unsafe.Pointer(&buf[0]))), hresult(hr)
 }
 
+// ReloadSymbols forwards spec to IDebugSymbols3::ReloadWide. spec may be
+// empty (reload anything stale), "/f" (force a full reload), or
+// "/f module" (force a single module reload). May download from the
+// symbol server — wrap in execWithCancel from the Go-public layer.
+func (s *Session) ReloadSymbols(spec string) error {
+	var hr C.int32_t
+	s.exec(func() {
+		cspec := C.CString(spec)
+		defer C.free(unsafe.Pointer(cspec))
+		hr = C.gokd_reload_symbols(s.handle, cspec)
+	})
+	return hresult(hr)
+}
+
 // ── Types ─────────────────────────────────────────────────────────────
 
 func (s *Session) GetTypeSize(module, typeName string) (uint64, error) {
@@ -562,14 +577,30 @@ func (s *Session) GetTypeFields(module, typeName string) ([]Field, error) {
 
 // ── Modules ───────────────────────────────────────────────────────────
 
+// SymbolType mirrors DEBUG_SYMTYPE_* in dbgeng.h, as carried by
+// DEBUG_MODULE_PARAMETERS::SymbolType.
+type SymbolType uint32
+
+const (
+	SymbolTypeNone     SymbolType = 0
+	SymbolTypeCOFF     SymbolType = 1
+	SymbolTypeCodeView SymbolType = 2
+	SymbolTypePDB      SymbolType = 3
+	SymbolTypeExport   SymbolType = 4
+	SymbolTypeDeferred SymbolType = 5
+	SymbolTypeSym      SymbolType = 6
+	SymbolTypeDIA      SymbolType = 7
+)
+
 // Module mirrors gokd_module_t.
 type Module struct {
-	Name      string
-	ImageName string
-	Base      uint64
-	Size      uint32
-	Timestamp uint32
-	Checksum  uint32
+	Name       string
+	ImageName  string
+	Base       uint64
+	Size       uint32
+	Timestamp  uint32
+	Checksum   uint32
+	SymbolType SymbolType
 }
 
 func (s *Session) GetModules() ([]Module, error) {
@@ -596,12 +627,13 @@ func (s *Session) GetModules() ([]Module, error) {
 	mods := make([]Module, int(count))
 	for i := 0; i < int(count); i++ {
 		mods[i] = Module{
-			Name:      C.GoString(&cmods[i].name[0]),
-			ImageName: C.GoString(&cmods[i].image_name[0]),
-			Base:      uint64(cmods[i].base),
-			Size:      uint32(cmods[i].size),
-			Timestamp: uint32(cmods[i].timestamp),
-			Checksum:  uint32(cmods[i].checksum),
+			Name:       C.GoString(&cmods[i].name[0]),
+			ImageName:  C.GoString(&cmods[i].image_name[0]),
+			Base:       uint64(cmods[i].base),
+			Size:       uint32(cmods[i].size),
+			Timestamp:  uint32(cmods[i].timestamp),
+			Checksum:   uint32(cmods[i].checksum),
+			SymbolType: SymbolType(cmods[i].symbol_type),
 		}
 	}
 	return mods, nil

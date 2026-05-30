@@ -48,7 +48,7 @@ type Session interface {
 	Detach() error
 
 	// Remote debugging (connect to dbgsrv.exe process server)
-	ConnectRemote(connection string) error   // "tcp:server=host,port=5005"
+	ConnectRemote(connection string) error // "tcp:server=host,port=5005"
 	DisconnectRemote() error
 
 	// Execution
@@ -84,6 +84,17 @@ type Session interface {
 	// Symbol path
 	SetSymbolPath(path string) error
 	SymbolPath() (string, error)
+	// ReloadSymbols forwards spec to IDebugSymbols3::ReloadWide. Pass an
+	// empty string to reload anything currently stale, "/f" to force a
+	// full reload, or "/f <module>" to force-reload a single module. The
+	// call may download from the symbol server and block for a long time;
+	// pass a cancellable context to bound the wait.
+	ReloadSymbols(ctx context.Context, spec string) error
+	// SymFix configures the symbol path to the standard public-symbol-server
+	// cache layout (srv*<cache>*https://msdl.microsoft.com/download/symbols),
+	// matching WinDbg's .symfix. If cache is empty, a per-user default is
+	// used.
+	SymFix(cache string) error
 
 	// Types
 	TypeSize(module, typeName string) (uint64, error)
@@ -200,8 +211,8 @@ var (
 )
 
 type CreateOptions struct {
-	Flags         uint32
-	InitialBreak  bool
+	Flags        uint32
+	InitialBreak bool
 }
 
 // KernelOptions controls kernel-target attach behaviour.
@@ -289,12 +300,55 @@ type Frame struct {
 }
 
 type Module struct {
-	Name      string
-	ImageName string
-	Base      uint64
-	Size      uint32
-	Timestamp uint32
-	Checksum  uint32
+	Name       string
+	ImageName  string
+	Base       uint64
+	Size       uint32
+	Timestamp  uint32
+	Checksum   uint32
+	SymbolType SymbolType
+}
+
+// SymbolType describes the kind of symbol information loaded for a module,
+// mirroring DEBUG_SYMTYPE_* in dbgeng.h. It is surfaced through
+// [Module.SymbolType] so callers can tell PDB-loaded modules apart from
+// export-only or deferred ones (the common "no symbols loaded yet" state).
+type SymbolType = dbgcgo.SymbolType
+
+const (
+	SymbolTypeNone     = dbgcgo.SymbolTypeNone
+	SymbolTypeCOFF     = dbgcgo.SymbolTypeCOFF
+	SymbolTypeCodeView = dbgcgo.SymbolTypeCodeView
+	SymbolTypePDB      = dbgcgo.SymbolTypePDB
+	SymbolTypeExport   = dbgcgo.SymbolTypeExport
+	SymbolTypeDeferred = dbgcgo.SymbolTypeDeferred
+	SymbolTypeSym      = dbgcgo.SymbolTypeSym
+	SymbolTypeDIA      = dbgcgo.SymbolTypeDIA
+)
+
+// SymbolTypeString returns a stable lower-case name for a SymbolType.
+// Returns "unknown(N)" for values outside the documented range.
+func SymbolTypeString(t SymbolType) string {
+	switch t {
+	case SymbolTypeNone:
+		return "none"
+	case SymbolTypeCOFF:
+		return "coff"
+	case SymbolTypeCodeView:
+		return "codeview"
+	case SymbolTypePDB:
+		return "pdb"
+	case SymbolTypeExport:
+		return "export"
+	case SymbolTypeDeferred:
+		return "deferred"
+	case SymbolTypeSym:
+		return "sym"
+	case SymbolTypeDIA:
+		return "dia"
+	default:
+		return fmt.Sprintf("unknown(%d)", uint32(t))
+	}
 }
 
 type Thread struct {
@@ -364,26 +418,36 @@ type ExceptionEvent struct {
 	FirstChance bool
 	Thread      *Thread
 }
-type ThreadCreatedEvent  struct{ Thread *Thread }
-type ThreadExitedEvent   struct{ SystemID uint32; ExitCode uint32 }
-type ProcessCreatedEvent struct{ ImageName string; BaseOffset uint64; ModuleSize uint32 }
-type ProcessExitedEvent  struct{ ExitCode uint32 }
-type ModuleLoadedEvent   struct{ Module *Module }
-type ModuleUnloadedEvent struct{ ImageBaseName string; BaseOffset uint64 }
+type ThreadCreatedEvent struct{ Thread *Thread }
+type ThreadExitedEvent struct {
+	SystemID uint32
+	ExitCode uint32
+}
+type ProcessCreatedEvent struct {
+	ImageName  string
+	BaseOffset uint64
+	ModuleSize uint32
+}
+type ProcessExitedEvent struct{ ExitCode uint32 }
+type ModuleLoadedEvent struct{ Module *Module }
+type ModuleUnloadedEvent struct {
+	ImageBaseName string
+	BaseOffset    uint64
+}
 
 // SessionStatus describes a DbgEng session-lifecycle transition delivered
 // via SessionStatusEvent. Values mirror dbgeng.h DEBUG_SESSION_*.
 type SessionStatus uint32
 
 const (
-	SessionStatusActive               SessionStatus = 0
-	SessionStatusEndActiveTerminate   SessionStatus = 1
-	SessionStatusEndActiveDetach      SessionStatus = 2
-	SessionStatusEndPassive           SessionStatus = 3
-	SessionStatusEnd                  SessionStatus = 4
-	SessionStatusReboot               SessionStatus = 5
-	SessionStatusHibernate            SessionStatus = 6
-	SessionStatusFailure              SessionStatus = 7
+	SessionStatusActive             SessionStatus = 0
+	SessionStatusEndActiveTerminate SessionStatus = 1
+	SessionStatusEndActiveDetach    SessionStatus = 2
+	SessionStatusEndPassive         SessionStatus = 3
+	SessionStatusEnd                SessionStatus = 4
+	SessionStatusReboot             SessionStatus = 5
+	SessionStatusHibernate          SessionStatus = 6
+	SessionStatusFailure            SessionStatus = 7
 )
 
 func (s SessionStatus) String() string {
@@ -411,15 +475,15 @@ func (s SessionStatus) String() string {
 
 type SessionStatusEvent struct{ Status SessionStatus }
 
-func (BreakpointEvent)    isEvent() {}
-func (ExceptionEvent)     isEvent() {}
-func (ThreadCreatedEvent) isEvent() {}
-func (ThreadExitedEvent)  isEvent() {}
+func (BreakpointEvent) isEvent()     {}
+func (ExceptionEvent) isEvent()      {}
+func (ThreadCreatedEvent) isEvent()  {}
+func (ThreadExitedEvent) isEvent()   {}
 func (ProcessCreatedEvent) isEvent() {}
-func (ProcessExitedEvent) isEvent() {}
-func (ModuleLoadedEvent)  isEvent() {}
+func (ProcessExitedEvent) isEvent()  {}
+func (ModuleLoadedEvent) isEvent()   {}
 func (ModuleUnloadedEvent) isEvent() {}
-func (SessionStatusEvent) isEvent() {}
+func (SessionStatusEvent) isEvent()  {}
 
 // ── session implementation ────────────────────────────────────────────
 
@@ -507,6 +571,31 @@ func (s *session) execWithCancel(ctx context.Context, fn func() (dbgcgo.StopEven
 		return nil, err
 	}
 	return s.makeStopEvent(cev), nil
+}
+
+// runWithCancel is the generic counterpart to execWithCancel for operations
+// that do not produce a StopEvent. It wires ctx cancellation to
+// CancelWait so long-blocking shim calls (symbol downloads, dump writes,
+// recursive memory reads) can be interrupted from the caller's side.
+// If ctx is nil, fn runs without cancellation support.
+func (s *session) runWithCancel(ctx context.Context, fn func() error) error {
+	if ctx == nil {
+		return fn()
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.inner.CancelWait()
+		case <-done:
+		}
+	}()
+	err := fn()
+	close(done)
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
 }
 
 func (s *session) Go(ctx context.Context) (*StopEvent, error) {
@@ -620,12 +709,13 @@ func (s *session) Modules() ([]*Module, error) {
 	out := make([]*Module, len(mods))
 	for i, m := range mods {
 		out[i] = &Module{
-			Name:      m.Name,
-			ImageName: m.ImageName,
-			Base:      m.Base,
-			Size:      m.Size,
-			Timestamp: m.Timestamp,
-			Checksum:  m.Checksum,
+			Name:       m.Name,
+			ImageName:  m.ImageName,
+			Base:       m.Base,
+			Size:       m.Size,
+			Timestamp:  m.Timestamp,
+			Checksum:   m.Checksum,
+			SymbolType: m.SymbolType,
 		}
 	}
 	return out, nil
@@ -645,6 +735,27 @@ func (s *session) SetSymbolPath(path string) error {
 
 func (s *session) SymbolPath() (string, error) {
 	return s.inner.GetSymbolPath()
+}
+
+// ReloadSymbols forwards spec to IDebugSymbols3::ReloadWide. See the
+// [Session] interface documentation for accepted spec values. Cancellation
+// via ctx interrupts long-running symbol downloads between dispatch turns.
+func (s *session) ReloadSymbols(ctx context.Context, spec string) error {
+	return s.runWithCancel(ctx, func() error { return s.inner.ReloadSymbols(spec) })
+}
+
+// SymFix mirrors WinDbg's .symfix and installs the standard
+// public-symbol-server cache path. When cache is empty, a per-user default
+// at "<UserCacheDir>/gokd/symbols" is used (falling back to "<TempDir>/gokd/symbols").
+func (s *session) SymFix(cache string) error {
+	if cache == "" {
+		cacheDir, err := os.UserCacheDir()
+		if err != nil || cacheDir == "" {
+			cacheDir = os.TempDir()
+		}
+		cache = filepath.Join(cacheDir, "gokd", "symbols")
+	}
+	return s.SetSymbolPath(fmt.Sprintf("srv*%s*https://msdl.microsoft.com/download/symbols", cache))
 }
 
 func (s *session) TypeSize(module, typeName string) (uint64, error) {

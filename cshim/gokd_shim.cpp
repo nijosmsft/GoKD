@@ -714,6 +714,24 @@ extern "C" int32_t gokd_get_symbol_path(gokd_session_t handle,
     return hr;
 }
 
+extern "C" int32_t gokd_reload_symbols(gokd_session_t handle,
+                                        const char *spec) {
+    S;
+    /* ReloadWide accepts NULL/empty for "reload everything that needs it".
+     * Otherwise the spec is forwarded verbatim (e.g. "/f", "/f nt"). */
+    const wchar_t *wptr = L"";
+    wchar_t *wspec = NULL;
+    if (spec && *spec) {
+        wspec = utf8_to_wide(spec);
+        if (!wspec) return E_OUTOFMEMORY;
+        wptr = wspec;
+    }
+    HRESULT hr = s->symbols->ReloadWide(wptr);
+    if (wspec) free(wspec);
+    SET_LAST_ERROR(hr);
+    return hr;
+}
+
 /* ====================================================================== */
 /*  Types                                                                 */
 /* ====================================================================== */
@@ -972,6 +990,7 @@ extern "C" int32_t gokd_get_modules(gokd_session_t handle,
             out[i].size = params.Size;
             out[i].timestamp = params.TimeDateStamp;
             out[i].checksum = params.Checksum;
+            out[i].symbol_type = params.SymbolType;
         }
 
         /* Get module name. */
