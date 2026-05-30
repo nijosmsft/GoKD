@@ -230,6 +230,32 @@ func formatBreakpoint(bp *gokd.Breakpoint) Breakpoint {
 	return out
 }
 
+// formatTypeValue recursively converts a TypeValue tree into the JSON
+// shape exposed by the dump_type tool: raw bytes become hex strings,
+// errors become string fields, children recurse.
+func formatTypeValue(tv *gokd.TypeValue) *typeValueOutput {
+	if tv == nil {
+		return nil
+	}
+	out := &typeValueOutput{
+		Name:       tv.Name,
+		TypeName:   tv.TypeName,
+		AddressHex: hex64(tv.Address),
+		Size:       tv.Size,
+		Decoded:    tv.Decoded,
+	}
+	if len(tv.Raw) > 0 {
+		out.RawHex = hex.EncodeToString(tv.Raw)
+	}
+	if tv.Err != nil {
+		out.Error = tv.Err.Error()
+	}
+	for _, c := range tv.Children {
+		out.Children = append(out.Children, formatTypeValue(c))
+	}
+	return out
+}
+
 // parseBreakpointAccess converts a list of "read"/"write"/"execute"/"io"
 // strings into the bitmask understood by the shim. Returns ErrBadAccess
 // when any entry is unknown.

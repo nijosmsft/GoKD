@@ -343,6 +343,28 @@ type bugCheckOutput struct {
 	Description string   `json:"description,omitempty"`
 }
 
+// --- t1-7 dump type ---
+
+type dumpTypeInput struct {
+	Module         string `json:"module" jsonschema:"module name whose symbols define the type (e.g. 'ntdll')"`
+	Type           string `json:"type" jsonschema:"type name (e.g. '_PEB' or 'MY_STRUCT')"`
+	AddressHex     string `json:"address_hex" jsonschema:"virtual address at which to read the typed value"`
+	MaxDepth       int    `json:"max_depth,omitempty" jsonschema:"recursion depth; 0 = header only (default 3)"`
+	FollowPtrs     bool   `json:"follow_ptrs,omitempty" jsonschema:"if true, follow non-NULL pointer fields one extra level (cycle-detected)"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty" jsonschema:"timeout in seconds; 0 means no timeout"`
+}
+
+type typeValueOutput struct {
+	Name       string             `json:"name,omitempty"`
+	TypeName   string             `json:"type_name,omitempty"`
+	AddressHex string             `json:"address_hex"`
+	Size       uint32             `json:"size"`
+	RawHex     string             `json:"raw_hex,omitempty"`
+	Error      string             `json:"error,omitempty"`
+	Decoded    any                `json:"decoded,omitempty"`
+	Children   []*typeValueOutput `json:"children,omitempty"`
+}
+
 func toolErr[Out any](err error) (*mcp.CallToolResult, Out, error) {
 	var zero Out
 	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, zero, nil
@@ -435,6 +457,9 @@ func registerTools(server *mcp.Server, s *srv) {
 	// --- t1-8 last event / bugcheck ---
 	mcp.AddTool(server, &mcp.Tool{Name: "last_exception", Description: "Return the most recent DEBUG_EVENT_EXCEPTION record reported by DbgEng (the .lastevent / .exr surface). Returns {found:false} when the last event was not an exception — e.g. an attach breakpoint or a process-exit notification. parameters carries raw EXCEPTION_RECORD.ExceptionInformation values (e.g. for access violations [0] is the read/write/execute flag and [1] is the faulting VA)."}, s.lastException)
 	mcp.AddTool(server, &mcp.Tool{Name: "bug_check", Description: "Read the kernel bugcheck record via IDebugControl4::ReadBugCheckData. Kernel-mode sessions only — user-mode targets return {found:false}. name and description are best-effort lookups for ~20 common codes; unknown codes still surface the raw code and four args."}, s.bugCheck)
+
+	// --- t1-7 dump type ---
+	mcp.AddTool(server, &mcp.Tool{Name: "dump_type", Description: "Walk a typed object recursively (the 'dt -r' surface). Resolves type in module's symbol namespace, reads address_hex as that type, and recurses into struct fields up to max_depth levels (default 3). follow_ptrs dereferences non-NULL pointer fields one extra level with cycle detection. Special decoders surface human-readable values for _UNICODE_STRING (string), _LIST_ENTRY (Flink/Blink), GUID, and _LARGE_INTEGER. Requires PDBs that carry the requested type — public-symbol-only PDBs typically do NOT include OS structures like _PEB."}, s.dumpType)
 }
 
 func (s *srv) attachProcess(ctx context.Context, _ *mcp.CallToolRequest, in attachProcessInput) (*mcp.CallToolResult, okOutput, error) {
@@ -1265,4 +1290,35 @@ func (s *srv) bugCheck(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) 
 		Name:        bc.Name,
 		Description: bc.Description,
 	}, nil
+}
+
+// --- t1-7 dump type ---
+
+func (s *srv) dumpType(ctx context.Context, _ *mcp.CallToolRequest, in dumpTypeInput) (*mcp.CallToolResult, typeValueOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[typeValueOutput](err)
+	}
+	if strings.TrimSpace(in.Module) == "" {
+		return toolErr[typeValueOutput](fmt.Errorf("module is required"))
+	}
+	if strings.TrimSpace(in.Type) == "" {
+		return toolErr[typeValueOutput](fmt.Errorf("type is required"))
+	}
+	addr, err := parseHexUint64(in.AddressHex, "address_hex")
+	if err != nil {
+		return toolErr[typeValueOutput](err)
+	}
+	ctx2, cancel, err := contextWithSeconds(ctx, in.TimeoutSeconds)
+	if err != nil {
+		return toolErr[typeValueOutput](err)
+	}
+	defer cancel()
+	tv, err := s.sess.DumpType(ctx2, in.Module, in.Type, addr, gokd.DumpTypeOptions{
+		MaxDepth:   in.MaxDepth,
+		FollowPtrs: in.FollowPtrs,
+	})
+	if err != nil {
+		return toolErr[typeValueOutput](err)
+	}
+	return nil, *formatTypeValue(tv), nil
 }

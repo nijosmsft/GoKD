@@ -199,6 +199,15 @@ type Session interface {
 	LastException() (*LastException, error)
 	BugCheck() (*BugCheck, error)
 
+	// Recursive type walker (t1-7). DumpType resolves typeName in
+	// module's symbol namespace and reads addr as that type, recursing
+	// into struct fields up to opts.MaxDepth levels deep. Set
+	// FollowPtrs to dereference non-NULL pointer fields one extra
+	// level (cycle detection guarantees termination). Special-case
+	// decoders fill TypeValue.Decoded for _UNICODE_STRING, _LIST_ENTRY,
+	// GUID, and _LARGE_INTEGER.
+	DumpType(ctx context.Context, module, typeName string, addr uint64, opts DumpTypeOptions) (*TypeValue, error)
+
 	Close() error
 }
 
