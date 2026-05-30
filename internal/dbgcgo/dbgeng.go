@@ -894,13 +894,43 @@ func (s *Session) SetCurrentThread(sysTID uint32) error {
 
 // ── Breakpoints ───────────────────────────────────────────────────────
 
+// BreakpointType distinguishes code breakpoints (instruction fetch) from
+// data ("break-on-access" / hardware) breakpoints.
+type BreakpointType uint32
+
+const (
+	BreakpointTypeCode BreakpointType = 0
+	BreakpointTypeData BreakpointType = 1
+)
+
+// BreakpointAccess is a bitmask of access types for a data breakpoint.
+type BreakpointAccess uint32
+
+const (
+	BreakpointAccessRead    BreakpointAccess = 0x1
+	BreakpointAccessWrite   BreakpointAccess = 0x2
+	BreakpointAccessExecute BreakpointAccess = 0x4
+	BreakpointAccessIO      BreakpointAccess = 0x8
+)
+
+// BreakpointMatchThreadAny is the wildcard thread ID — a BP with this
+// MatchThreadID fires regardless of which thread triggered it. It is
+// also used as the "leave alone" sentinel for ConfigureBreakpoint.
+const BreakpointMatchThreadAny uint32 = 0xFFFFFFFF
+
 // Breakpoint mirrors gokd_bp_t.
 type Breakpoint struct {
-	ID         uint32
-	Offset     uint64
-	Expression string
-	Flags      uint32
-	Enabled    bool
+	ID            uint32
+	Offset        uint64
+	Expression    string
+	Flags         uint32
+	Enabled       bool
+	Type          BreakpointType
+	Size          uint32
+	Access        BreakpointAccess
+	PassCount     uint32
+	CurrentPass   uint32
+	MatchThreadID uint32
 }
 
 func (s *Session) AddBreakpoint(addr uint64) (uint32, error) {
@@ -921,6 +951,77 @@ func (s *Session) AddBreakpointSym(symbol string) (uint32, error) {
 		hr = C.gokd_add_breakpoint_sym(s.handle, csym, &id)
 	})
 	return uint32(id), hresult(hr)
+}
+
+// AddDataBreakpoint sets a hardware ("break-on-access") breakpoint
+// covering size bytes at address. size must be 1, 2, 4, or 8 (validated
+// in the public layer).
+func (s *Session) AddDataBreakpoint(address uint64, size uint32, access BreakpointAccess) (uint32, error) {
+	var id C.uint32_t
+	var hr C.int32_t
+	s.exec(func() {
+		hr = C.gokd_add_data_breakpoint(s.handle,
+			C.uint64_t(address),
+			C.uint32_t(size),
+			C.uint32_t(access),
+			&id)
+	})
+	return uint32(id), hresult(hr)
+}
+
+// ConfigureBreakpoint applies non-positional configuration to an
+// existing breakpoint. passCount==0 leaves the existing pass count
+// alone; matchThreadID==BreakpointMatchThreadAny leaves the existing
+// thread filter alone; command==nil leaves the existing command alone;
+// command pointing to an empty string clears the command.
+func (s *Session) ConfigureBreakpoint(id uint32, passCount uint32, matchThreadID uint32, command *string) error {
+	var hr C.int32_t
+	s.exec(func() {
+		var ccmd *C.char
+		if command != nil {
+			ccmd = C.CString(*command)
+			defer C.free(unsafe.Pointer(ccmd))
+		}
+		hr = C.gokd_configure_breakpoint(s.handle,
+			C.uint32_t(id),
+			C.uint32_t(passCount),
+			C.uint32_t(matchThreadID),
+			ccmd)
+	})
+	return hresult(hr)
+}
+
+// BreakpointCommand returns the WinDbg command string attached to the
+// breakpoint, or "" if none has been set.
+func (s *Session) BreakpointCommand(id uint32) (string, error) {
+	var need C.uint32_t
+	var hr C.int32_t
+	s.exec(func() {
+		hr = C.gokd_get_breakpoint_command(s.handle,
+			C.uint32_t(id), nil, 0, &need)
+	})
+	if err := hresult(hr); err != nil {
+		return "", err
+	}
+	if need <= 1 {
+		return "", nil
+	}
+	buf := make([]byte, int(need))
+	s.exec(func() {
+		hr = C.gokd_get_breakpoint_command(s.handle,
+			C.uint32_t(id),
+			(*C.char)(unsafe.Pointer(&buf[0])),
+			C.uint32_t(len(buf)),
+			&need)
+	})
+	if err := hresult(hr); err != nil {
+		return "", err
+	}
+	// Strip trailing NUL.
+	if n := len(buf); n > 0 && buf[n-1] == 0 {
+		buf = buf[:n-1]
+	}
+	return string(buf), nil
 }
 
 func (s *Session) RemoveBreakpoint(id uint32) error {
@@ -967,11 +1068,17 @@ func (s *Session) ListBreakpoints() ([]Breakpoint, error) {
 	bps := make([]Breakpoint, int(count))
 	for i := 0; i < int(count); i++ {
 		bps[i] = Breakpoint{
-			ID:         uint32(cbps[i].id),
-			Offset:     uint64(cbps[i].offset),
-			Expression: C.GoString(&cbps[i].expression[0]),
-			Flags:      uint32(cbps[i].flags),
-			Enabled:    cbps[i].enabled != 0,
+			ID:            uint32(cbps[i].id),
+			Offset:        uint64(cbps[i].offset),
+			Expression:    C.GoString(&cbps[i].expression[0]),
+			Flags:         uint32(cbps[i].flags),
+			Enabled:       cbps[i].enabled != 0,
+			Type:          BreakpointType(cbps[i]._type),
+			Size:          uint32(cbps[i].size),
+			Access:        BreakpointAccess(cbps[i].access),
+			PassCount:     uint32(cbps[i].pass_count),
+			CurrentPass:   uint32(cbps[i].current_pass),
+			MatchThreadID: uint32(cbps[i].match_thread_id),
 		}
 	}
 	return bps, nil

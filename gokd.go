@@ -44,6 +44,10 @@ var ErrTimeout = dbgcgo.ErrTimeout
 // benign "no result" from a hard failure.
 var ErrNotFound = dbgcgo.ErrNotFound
 
+// HRESULTError is the canonical error type returned by all DbgEng-backed
+// operations. Use errors.As(err, &h) to inspect the raw HRESULT.
+type HRESULTError = dbgcgo.HRESULTError
+
 // Session is the top-level handle to a debug session.
 // All methods are safe to call from any goroutine.
 type Session interface {
@@ -119,6 +123,23 @@ type Session interface {
 	RemoveBreakpoint(id uint32) error
 	EnableBreakpoint(id uint32, enabled bool) error
 	Breakpoints() ([]*Breakpoint, error)
+
+	// Data + conditional breakpoints (t1-5). AddDataBreakpoint installs
+	// a hardware ("break-on-access") breakpoint at addr covering size
+	// bytes (size must be 1, 2, 4, or 8). access is any combination of
+	// BreakpointAccessRead/Write/Execute/IO. Only four data breakpoints
+	// may be enabled concurrently on x64 hardware; the fifth will fail
+	// at the next Go().
+	//
+	// ConfigureBreakpoint applies non-positional fields (pass count,
+	// thread filter, WinDbg command) to an existing breakpoint without
+	// recreating it. See BreakpointOptions for sentinel semantics.
+	//
+	// BreakpointCommand returns the configured WinDbg command, or ""
+	// if none has been set.
+	AddDataBreakpoint(addr uint64, size uint32, access BreakpointAccess) (*Breakpoint, error)
+	ConfigureBreakpoint(id uint32, opts BreakpointOptions) error
+	BreakpointCommand(id uint32) (string, error)
 
 	// Disassembly
 	Disassemble(addr uint64) (*Instruction, error)
@@ -429,10 +450,56 @@ type RegisterSet struct {
 }
 
 type Breakpoint struct {
-	ID         uint32
-	Address    uint64
-	Expression string
-	Enabled    bool
+	ID            uint32
+	Address       uint64
+	Expression    string
+	Enabled       bool
+	Type          BreakpointType
+	Size          uint32
+	Access        BreakpointAccess
+	PassCount     uint32
+	CurrentPass   uint32
+	MatchThreadID uint32
+	Command       string
+}
+
+// BreakpointType and BreakpointAccess re-export the underlying
+// dbgcgo enums so callers can configure data breakpoints without
+// importing the internal package.
+type (
+	BreakpointType   = dbgcgo.BreakpointType
+	BreakpointAccess = dbgcgo.BreakpointAccess
+)
+
+const (
+	BreakpointTypeCode      = dbgcgo.BreakpointTypeCode
+	BreakpointTypeData      = dbgcgo.BreakpointTypeData
+	BreakpointAccessRead    = dbgcgo.BreakpointAccessRead
+	BreakpointAccessWrite   = dbgcgo.BreakpointAccessWrite
+	BreakpointAccessExecute = dbgcgo.BreakpointAccessExecute
+	BreakpointAccessIO      = dbgcgo.BreakpointAccessIO
+)
+
+// BreakpointMatchThreadAny is the wildcard thread filter — the value
+// to pass to BreakpointOptions.MatchThreadID to leave the filter alone.
+const BreakpointMatchThreadAny = dbgcgo.BreakpointMatchThreadAny
+
+// BreakpointOptions describes non-positional breakpoint configuration.
+// All fields are optional: zero / empty means "leave existing alone".
+//
+//   - PassCount     0  → leave existing pass count alone. Pass 1 to "fire
+//     every hit" explicitly.
+//   - MatchThreadID 0xFFFFFFFF (BreakpointMatchThreadAny) → leave existing
+//     thread filter alone.
+//   - Command       "" → leave existing command alone. Use ClearCommand
+//     to clear it.
+//   - ClearCommand  if true, the breakpoint command is unconditionally
+//     cleared (overrides Command).
+type BreakpointOptions struct {
+	PassCount     uint32
+	MatchThreadID uint32
+	Command       string
+	ClearCommand  bool
 }
 
 type Field struct {
@@ -1027,7 +1094,7 @@ func (s *session) AddBreakpoint(addr uint64) (*Breakpoint, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Breakpoint{ID: id, Address: addr, Enabled: true}, nil
+	return &Breakpoint{ID: id, Address: addr, Enabled: true, Type: BreakpointTypeCode}, nil
 }
 
 func (s *session) AddBreakpointSym(symbol string) (*Breakpoint, error) {
@@ -1035,7 +1102,59 @@ func (s *session) AddBreakpointSym(symbol string) (*Breakpoint, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Breakpoint{ID: id, Expression: symbol, Enabled: true}, nil
+	return &Breakpoint{ID: id, Expression: symbol, Enabled: true, Type: BreakpointTypeCode}, nil
+}
+
+// AddDataBreakpoint installs a hardware "break-on-access" breakpoint at
+// addr. size must be one of {1, 2, 4, 8} and access must contain at
+// least one of BreakpointAccessRead/Write/Execute/IO; both are validated
+// at the Go layer to keep DbgEng's errors readable.
+func (s *session) AddDataBreakpoint(addr uint64, size uint32, access BreakpointAccess) (*Breakpoint, error) {
+	switch size {
+	case 1, 2, 4, 8:
+	default:
+		return nil, dbgcgo.HRESULTError(int32(0x80070057 - 0x100000000)) // E_INVALIDARG
+	}
+	if access == 0 {
+		return nil, dbgcgo.HRESULTError(int32(0x80070057 - 0x100000000))
+	}
+	id, err := s.inner.AddDataBreakpoint(addr, size, access)
+	if err != nil {
+		return nil, err
+	}
+	return &Breakpoint{
+		ID:            id,
+		Address:       addr,
+		Enabled:       true,
+		Type:          BreakpointTypeData,
+		Size:          size,
+		Access:        access,
+		MatchThreadID: BreakpointMatchThreadAny,
+	}, nil
+}
+
+// ConfigureBreakpoint applies non-positional fields (pass count, thread
+// filter, command) to an existing breakpoint. See BreakpointOptions for
+// per-field "leave alone" sentinel semantics.
+func (s *session) ConfigureBreakpoint(id uint32, opts BreakpointOptions) error {
+	matchTID := opts.MatchThreadID
+	if matchTID == 0 {
+		matchTID = BreakpointMatchThreadAny
+	}
+	var cmd *string
+	switch {
+	case opts.ClearCommand:
+		empty := ""
+		cmd = &empty
+	case opts.Command != "":
+		c := opts.Command
+		cmd = &c
+	}
+	return s.inner.ConfigureBreakpoint(id, opts.PassCount, matchTID, cmd)
+}
+
+func (s *session) BreakpointCommand(id uint32) (string, error) {
+	return s.inner.BreakpointCommand(id)
 }
 
 func (s *session) RemoveBreakpoint(id uint32) error {
@@ -1053,11 +1172,19 @@ func (s *session) Breakpoints() ([]*Breakpoint, error) {
 	}
 	out := make([]*Breakpoint, len(bps))
 	for i, b := range bps {
+		cmd, _ := s.inner.BreakpointCommand(b.ID)
 		out[i] = &Breakpoint{
-			ID:         b.ID,
-			Address:    b.Offset,
-			Expression: b.Expression,
-			Enabled:    b.Enabled,
+			ID:            b.ID,
+			Address:       b.Offset,
+			Expression:    b.Expression,
+			Enabled:       b.Enabled,
+			Type:          b.Type,
+			Size:          b.Size,
+			Access:        b.Access,
+			PassCount:     b.PassCount,
+			CurrentPass:   b.CurrentPass,
+			MatchThreadID: b.MatchThreadID,
+			Command:       cmd,
 		}
 	}
 	return out, nil

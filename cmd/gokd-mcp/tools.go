@@ -284,6 +284,29 @@ type queryRegionOutput struct {
 	TypeHex              string `json:"type_hex"`
 }
 
+// --- t1-5 data + conditional breakpoints ---
+
+type addDataBreakpointInput struct {
+	AddressHex string   `json:"address_hex" jsonschema:"watched virtual address (hex)"`
+	Size       uint32   `json:"size" jsonschema:"watched region size in bytes; must be 1, 2, 4, or 8"`
+	Access     []string `json:"access" jsonschema:"access types that trip the breakpoint; any combination of 'read', 'write', 'execute', 'io'"`
+}
+
+type configureBreakpointInput struct {
+	ID            uint32  `json:"id" jsonschema:"breakpoint ID returned by add_breakpoint / add_data_breakpoint"`
+	PassCount     uint32  `json:"pass_count,omitempty" jsonschema:"hit count before the BP fires; 0 leaves existing value alone"`
+	MatchThreadID *uint32 `json:"match_thread_id,omitempty" jsonschema:"system thread ID filter; omit to leave existing value alone, or pass 0xFFFFFFFF for 'any thread'"`
+	Command       *string `json:"command,omitempty" jsonschema:"WinDbg command to execute on hit; omit to leave alone, empty string to clear"`
+}
+
+type breakpointCommandInput struct {
+	ID uint32 `json:"id" jsonschema:"breakpoint ID"`
+}
+
+type breakpointCommandOutput struct {
+	Command string `json:"command"`
+}
+
 // --- t1-2 write dump ---
 
 type writeDumpInput struct {
@@ -377,6 +400,11 @@ func registerTools(server *mcp.Server, s *srv) {
 
 	// --- t1-2 write dump ---
 	mcp.AddTool(server, &mcp.Tool{Name: "write_dump", Description: "Snapshot the current target to a .dmp file via IDebugClient5::WriteDumpFileWide. path must be absolute. kind is 'small' (1024), 'default' (1025), or 'full' (1026) — defaults to 'default'. flags is the raw DEBUG_FORMAT_USER_SMALL_* bitmask. Synchronous and uncancellable mid-call; default timeout_seconds is 600. Use to capture state for offline analysis."}, s.writeDump)
+
+	// --- t1-5 data + conditional breakpoints ---
+	mcp.AddTool(server, &mcp.Tool{Name: "add_data_breakpoint", Description: "Install a hardware ('break-on-access') breakpoint at address_hex covering size bytes. size must be 1, 2, 4, or 8. access is any non-empty subset of ['read', 'write', 'execute', 'io']. x64 hardware supports at most four enabled data breakpoints concurrently — the fifth will fail at the next go_execution call."}, s.addDataBreakpoint)
+	mcp.AddTool(server, &mcp.Tool{Name: "configure_breakpoint", Description: "Apply non-positional configuration (pass count, thread filter, WinDbg command) to an existing breakpoint without recreating it. Each field is independently optional: pass_count=0 leaves existing alone; omit match_thread_id to leave alone or pass 0xFFFFFFFF for 'any thread'; omit command to leave alone, pass empty string to clear."}, s.configureBreakpoint)
+	mcp.AddTool(server, &mcp.Tool{Name: "breakpoint_command", Description: "Return the WinDbg command string attached to a breakpoint (empty if none)."}, s.breakpointCommand)
 }
 
 func (s *srv) attachProcess(ctx context.Context, _ *mcp.CallToolRequest, in attachProcessInput) (*mcp.CallToolResult, okOutput, error) {
@@ -1090,4 +1118,63 @@ func (s *srv) writeDump(ctx context.Context, _ *mcp.CallToolRequest, in writeDum
 		return toolErr[okOutput](err)
 	}
 	return nil, okOutput{OK: true}, nil
+}
+
+// --- t1-5 data + conditional breakpoints ---
+
+func (s *srv) addDataBreakpoint(ctx context.Context, _ *mcp.CallToolRequest, in addDataBreakpointInput) (*mcp.CallToolResult, addBreakpointOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[addBreakpointOutput](err)
+	}
+	addr, err := parseHexUint64(in.AddressHex, "address_hex")
+	if err != nil {
+		return toolErr[addBreakpointOutput](err)
+	}
+	if len(in.Access) == 0 {
+		return toolErr[addBreakpointOutput](fmt.Errorf("access must contain at least one of 'read', 'write', 'execute', 'io'"))
+	}
+	mask, err := parseBreakpointAccess(in.Access)
+	if err != nil {
+		return toolErr[addBreakpointOutput](err)
+	}
+	bp, err := s.sess.AddDataBreakpoint(addr, in.Size, mask)
+	if err != nil {
+		return toolErr[addBreakpointOutput](err)
+	}
+	return nil, addBreakpointOutput{ID: bp.ID, AddressHex: hex64(bp.Address)}, nil
+}
+
+func (s *srv) configureBreakpoint(ctx context.Context, _ *mcp.CallToolRequest, in configureBreakpointInput) (*mcp.CallToolResult, okOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[okOutput](err)
+	}
+	opts := gokd.BreakpointOptions{
+		PassCount:     in.PassCount,
+		MatchThreadID: gokd.BreakpointMatchThreadAny,
+	}
+	if in.MatchThreadID != nil {
+		opts.MatchThreadID = *in.MatchThreadID
+	}
+	if in.Command != nil {
+		if *in.Command == "" {
+			opts.ClearCommand = true
+		} else {
+			opts.Command = *in.Command
+		}
+	}
+	if err := s.sess.ConfigureBreakpoint(in.ID, opts); err != nil {
+		return toolErr[okOutput](err)
+	}
+	return nil, okOutput{OK: true}, nil
+}
+
+func (s *srv) breakpointCommand(ctx context.Context, _ *mcp.CallToolRequest, in breakpointCommandInput) (*mcp.CallToolResult, breakpointCommandOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[breakpointCommandOutput](err)
+	}
+	cmd, err := s.sess.BreakpointCommand(in.ID)
+	if err != nil {
+		return toolErr[breakpointCommandOutput](err)
+	}
+	return nil, breakpointCommandOutput{Command: cmd}, nil
 }

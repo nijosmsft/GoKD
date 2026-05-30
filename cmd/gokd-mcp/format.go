@@ -129,10 +129,17 @@ type Field struct {
 }
 
 type Breakpoint struct {
-	ID         uint32 `json:"id"`
-	AddressHex string `json:"address_hex"`
-	Expression string `json:"expression,omitempty"`
-	Enabled    bool   `json:"enabled"`
+	ID            uint32   `json:"id"`
+	AddressHex    string   `json:"address_hex"`
+	Expression    string   `json:"expression,omitempty"`
+	Enabled       bool     `json:"enabled"`
+	Type          string   `json:"type,omitempty"`
+	Size          uint32   `json:"size,omitempty"`
+	Access        []string `json:"access,omitempty"`
+	PassCount     uint32   `json:"pass_count,omitempty"`
+	CurrentPass   uint32   `json:"current_pass,omitempty"`
+	MatchThreadID *uint32  `json:"match_thread_id,omitempty"`
+	Command       string   `json:"command,omitempty"`
 }
 
 type ExceptionInfo struct {
@@ -186,7 +193,65 @@ func formatField(f *gokd.Field) Field {
 }
 
 func formatBreakpoint(bp *gokd.Breakpoint) Breakpoint {
-	return Breakpoint{ID: bp.ID, AddressHex: hex64(bp.Address), Expression: bp.Expression, Enabled: bp.Enabled}
+	out := Breakpoint{
+		ID:          bp.ID,
+		AddressHex:  hex64(bp.Address),
+		Expression:  bp.Expression,
+		Enabled:     bp.Enabled,
+		Size:        bp.Size,
+		PassCount:   bp.PassCount,
+		CurrentPass: bp.CurrentPass,
+		Command:     bp.Command,
+	}
+	switch bp.Type {
+	case gokd.BreakpointTypeData:
+		out.Type = "data"
+	default:
+		out.Type = "code"
+	}
+	if bp.Access != 0 {
+		if bp.Access&gokd.BreakpointAccessRead != 0 {
+			out.Access = append(out.Access, "read")
+		}
+		if bp.Access&gokd.BreakpointAccessWrite != 0 {
+			out.Access = append(out.Access, "write")
+		}
+		if bp.Access&gokd.BreakpointAccessExecute != 0 {
+			out.Access = append(out.Access, "execute")
+		}
+		if bp.Access&gokd.BreakpointAccessIO != 0 {
+			out.Access = append(out.Access, "io")
+		}
+	}
+	if bp.MatchThreadID != gokd.BreakpointMatchThreadAny {
+		mtid := bp.MatchThreadID
+		out.MatchThreadID = &mtid
+	}
+	return out
+}
+
+// parseBreakpointAccess converts a list of "read"/"write"/"execute"/"io"
+// strings into the bitmask understood by the shim. Returns ErrBadAccess
+// when any entry is unknown.
+func parseBreakpointAccess(in []string) (gokd.BreakpointAccess, error) {
+	var mask gokd.BreakpointAccess
+	for _, s := range in {
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "read", "r":
+			mask |= gokd.BreakpointAccessRead
+		case "write", "w":
+			mask |= gokd.BreakpointAccessWrite
+		case "execute", "exec", "x":
+			mask |= gokd.BreakpointAccessExecute
+		case "io":
+			mask |= gokd.BreakpointAccessIO
+		case "":
+			continue
+		default:
+			return 0, fmt.Errorf("unknown breakpoint access %q (expected read/write/execute/io)", s)
+		}
+	}
+	return mask, nil
 }
 
 func formatStopEvent(ev *gokd.StopEvent) StopEvent {

@@ -1314,30 +1314,49 @@ extern "C" int32_t gokd_set_current_thread(gokd_session_t handle,
 /*  Breakpoints                                                           */
 /* ====================================================================== */
 
-extern "C" int32_t gokd_add_breakpoint(gokd_session_t handle,
-                                        uint64_t addr, uint32_t *out_id) {
-    S;
+/* Shared body for code/data breakpoint creation. For data BPs, also
+ * configures the size and access mask via SetDataParameters before
+ * SetOffset (DbgEng validates the offset against the data params). On
+ * any failure after AddBreakpoint2 succeeds, the half-built breakpoint
+ * is removed so callers don't see leaked entries in list_breakpoints. */
+static HRESULT add_bp_impl(gokd_session *s,
+                            ULONG type,
+                            uint64_t offset,
+                            uint32_t size,
+                            uint32_t access,
+                            uint32_t *out_id) {
     IDebugBreakpoint2 *bp = NULL;
-    HRESULT hr;
-    
-        hr = s->control->AddBreakpoint2(DEBUG_BREAKPOINT_CODE, DEBUG_ANY_ID,
-                                         &bp);
+    HRESULT hr = s->control->AddBreakpoint2(type, DEBUG_ANY_ID, &bp);
+    if (FAILED(hr) || !bp) return hr;
 
-    if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
+    if (type == DEBUG_BREAKPOINT_DATA) {
+        hr = bp->SetDataParameters((ULONG)size, (ULONG)access);
+        if (FAILED(hr)) {
+            s->control->RemoveBreakpoint2(bp);
+            return hr;
+        }
+    }
 
-    
-        hr = bp->SetOffset(addr);
+    hr = bp->SetOffset((ULONG64)offset);
+    if (FAILED(hr)) {
+        s->control->RemoveBreakpoint2(bp);
+        return hr;
+    }
 
-    if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
-
-    
-        bp->AddFlags(DEBUG_BREAKPOINT_ENABLED);
-
+    bp->AddFlags(DEBUG_BREAKPOINT_ENABLED);
 
     ULONG id = 0;
     bp->GetId(&id);
     if (out_id) *out_id = id;
     return S_OK;
+}
+
+extern "C" int32_t gokd_add_breakpoint(gokd_session_t handle,
+                                        uint64_t addr, uint32_t *out_id) {
+    S;
+    HRESULT hr = add_bp_impl(s, DEBUG_BREAKPOINT_CODE, addr, 0, 0, out_id);
+    SET_LAST_ERROR(hr);
+    return hr;
 }
 
 extern "C" int32_t gokd_add_breakpoint_sym(gokd_session_t handle,
@@ -1452,9 +1471,111 @@ extern "C" int32_t gokd_list_breakpoints(gokd_session_t handle,
         bp->GetFlags(&flags);
         out[i].flags = flags;
         out[i].enabled = (flags & DEBUG_BREAKPOINT_ENABLED) ? 1 : 0;
+
+        /* t1-5: fill in type/size/access/pass-count/match-thread. */
+        DEBUG_BREAKPOINT_PARAMETERS p;
+        memset(&p, 0, sizeof(p));
+        if (SUCCEEDED(bp->GetParameters(&p))) {
+            out[i].type            = p.BreakType;
+            out[i].size            = p.DataSize;
+            out[i].access          = p.DataAccessType;
+            out[i].pass_count      = p.PassCount;
+            out[i].current_pass    = p.CurrentPassCount;
+            out[i].match_thread_id = p.MatchThread;
+        } else {
+            out[i].match_thread_id = DEBUG_ANY_ID;
+        }
     }
 
     if (count) *count = n;
+    return S_OK;
+}
+
+/* ---------------------------------------------------------------------- */
+/*  Data / conditional breakpoints (t1-5)                                 */
+/* ---------------------------------------------------------------------- */
+
+extern "C" int32_t gokd_add_data_breakpoint(gokd_session_t handle,
+                                             uint64_t address,
+                                             uint32_t size,
+                                             uint32_t access,
+                                             uint32_t *out_id) {
+    S;
+    HRESULT hr = add_bp_impl(s, DEBUG_BREAKPOINT_DATA, address, size, access,
+                              out_id);
+    SET_LAST_ERROR(hr);
+    return hr;
+}
+
+extern "C" int32_t gokd_configure_breakpoint(gokd_session_t handle,
+                                              uint32_t id,
+                                              uint32_t pass_count,
+                                              uint32_t match_thread_id,
+                                              const char *command_utf8) {
+    S;
+    IDebugBreakpoint2 *bp = NULL;
+    HRESULT hr = s->control->GetBreakpointById2(id, &bp);
+    if (FAILED(hr) || !bp) { SET_LAST_ERROR(hr); return hr; }
+
+    if (pass_count != 0) {
+        hr = bp->SetPassCount(pass_count);
+        if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
+    }
+
+    if (match_thread_id != DEBUG_ANY_ID) {
+        hr = bp->SetMatchThreadId(match_thread_id);
+        if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
+    }
+
+    if (command_utf8 != NULL) {
+        wchar_t *wcmd = utf8_to_wide(command_utf8);
+        if (!wcmd) { SET_LAST_ERROR(E_OUTOFMEMORY); return E_OUTOFMEMORY; }
+        hr = bp->SetCommandWide(wcmd);
+        free(wcmd);
+        if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
+    }
+
+    return S_OK;
+}
+
+extern "C" int32_t gokd_get_breakpoint_command(gokd_session_t handle,
+                                                uint32_t id,
+                                                char *buf, uint32_t cap,
+                                                uint32_t *needed) {
+    S;
+    IDebugBreakpoint2 *bp = NULL;
+    HRESULT hr = s->control->GetBreakpointById2(id, &bp);
+    if (FAILED(hr) || !bp) { SET_LAST_ERROR(hr); return hr; }
+
+    ULONG wlen = 0;
+    hr = bp->GetCommandWide(NULL, 0, &wlen);
+    if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
+
+    if (wlen == 0) {
+        if (needed) *needed = 1; /* room for NUL */
+        if (buf && cap > 0) buf[0] = 0;
+        return S_OK;
+    }
+
+    wchar_t *wcmd = (wchar_t*)malloc(sizeof(wchar_t) * wlen);
+    if (!wcmd) { SET_LAST_ERROR(E_OUTOFMEMORY); return E_OUTOFMEMORY; }
+
+    hr = bp->GetCommandWide(wcmd, wlen, NULL);
+    if (FAILED(hr)) { free(wcmd); SET_LAST_ERROR(hr); return hr; }
+
+    int u8len = WideCharToMultiByte(CP_UTF8, 0, wcmd, -1, NULL, 0, NULL, NULL);
+    if (u8len <= 0) { free(wcmd); SET_LAST_ERROR(E_FAIL); return E_FAIL; }
+
+    if (needed) *needed = (uint32_t)u8len;
+    if (!buf) { free(wcmd); return S_OK; }
+
+    if ((uint32_t)u8len > cap) {
+        free(wcmd);
+        return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+    }
+
+    WideCharToMultiByte(CP_UTF8, 0, wcmd, -1, buf, (int)cap, NULL, NULL);
+    free(wcmd);
     return S_OK;
 }
 

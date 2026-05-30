@@ -104,6 +104,13 @@ typedef struct {
     char     expression[512];
     uint32_t flags;   /* DEBUG_BREAKPOINT_* flags */
     uint32_t enabled;
+    /* t1-5 additions (binary-additive — no external consumers). */
+    uint32_t type;             /* GOKD_BP_CODE / GOKD_BP_DATA */
+    uint32_t size;             /* data BP size (1/2/4/8); 0 for code BP */
+    uint32_t access;           /* GOKD_BP_ACCESS_* bits; 0 for code BP */
+    uint32_t pass_count;       /* configured pass count (0 = every hit) */
+    uint32_t current_pass;     /* remaining hits before BP fires */
+    uint32_t match_thread_id;  /* DEBUG_ANY_ID (0xFFFFFFFF) means "any" */
 } gokd_bp_t;
 
 /* Type field */
@@ -597,6 +604,56 @@ int32_t gokd_enable_breakpoint(gokd_session_t s, uint32_t id, int enable);
 int32_t gokd_list_breakpoints(gokd_session_t s,
                                gokd_bp_t *out, uint32_t max,
                                uint32_t *count);
+
+/* ====================================================================== */
+/*  Data and conditional breakpoints (t1-5)                               */
+/* ====================================================================== */
+
+#define GOKD_BP_CODE 0
+#define GOKD_BP_DATA 1
+
+#define GOKD_BP_ACCESS_READ    0x1
+#define GOKD_BP_ACCESS_WRITE   0x2
+#define GOKD_BP_ACCESS_EXECUTE 0x4
+#define GOKD_BP_ACCESS_IO      0x8
+
+/* DEBUG_ANY_ID — used as "any thread" / "leave alone" sentinel. */
+#define GOKD_BP_MATCH_THREAD_ANY 0xFFFFFFFFu
+
+/*
+ * Add a data ("break-on-access" / hardware) breakpoint at address. size
+ * must be 1, 2, 4, or 8. access is a bitmask of GOKD_BP_ACCESS_*. x64
+ * hardware supports up to four enabled data breakpoints concurrently;
+ * the fifth fails with an out-of-resources HRESULT on Go().
+ */
+int32_t gokd_add_data_breakpoint(gokd_session_t s,
+                                  uint64_t address,
+                                  uint32_t size,
+                                  uint32_t access,
+                                  uint32_t *out_id);
+
+/*
+ * Apply non-positional configuration to an existing breakpoint. Fields
+ * marked "ignore" are left unchanged on the BP:
+ *   * pass_count == 0  : leave existing pass count
+ *   * match_thread_id == GOKD_BP_MATCH_THREAD_ANY : leave existing thread filter
+ *   * command_utf8 == NULL : leave existing command
+ *   * command_utf8 == ""   : clear command
+ */
+int32_t gokd_configure_breakpoint(gokd_session_t s,
+                                   uint32_t id,
+                                   uint32_t pass_count,
+                                   uint32_t match_thread_id,
+                                   const char *command_utf8);
+
+/*
+ * Read the WinDbg command string attached to a breakpoint. Count-then-
+ * fetch: pass buf=NULL to get the required UTF-8 byte length (including
+ * NUL) in *needed.
+ */
+int32_t gokd_get_breakpoint_command(gokd_session_t s, uint32_t id,
+                                     char *buf, uint32_t cap,
+                                     uint32_t *needed);
 
 /* ====================================================================== */
 /*  Disassembly                                                           */
