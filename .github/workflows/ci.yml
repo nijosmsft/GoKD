@@ -89,6 +89,12 @@ jobs:
           unset WINDBG_SDK WINDOWS_SDK_INCLUDE
           go test -tags manual -v -timeout 5m -run TestMCPEndToEnd ./cmd/gokd-mcp/
 
+      - name: MCP server -listen mode test (manual tag)
+        run: |
+          set -euo pipefail
+          unset WINDBG_SDK WINDOWS_SDK_INCLUDE
+          go test -tags manual -v -timeout 5m -run TestMCPListenEndToEnd ./cmd/gokd-mcp/
+
       - name: Upload built binaries
         if: always()
         uses: actions/upload-artifact@v4

@@ -21,6 +21,10 @@ vendor/
 # Agent handoff notes (contain internal lab info; keep local)
 HANDOFF.md
 
+# gokd-mcp runtime logs
+gokd-mcp.log
+gokd-mcp-remote.log
+
 # IDE
 .vscode/
 .idea/

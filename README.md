@@ -207,6 +207,87 @@ walks through `get_modules`, `get_threads`, `get_registers`, `get_stack`, and
 go test -tags manual -v -run TestMCPEndToEnd ./cmd/gokd-mcp/
 ```
 
+### Transport modes
+
+`gokd-mcp` speaks the same set of 33 MCP tools regardless of how it's invoked.
+The flags decide where the engine actually runs:
+
+| Flag | Engine runs on | Use when |
+|---|---|---|
+| (default) | This box, stdio | Copilot / Claude Desktop, default config |
+| `-listen ADDR` | This box, TCP | You want to attach a client manually, or be the target of a `-remote` tunnel |
+| `-remote NODE` | Remote lablink node, stdio proxy | You want to debug something a remote node can see — kernel KDNET, a target the local box can't reach, or simply to keep DbgEng off the operator's workstation |
+
+#### `-listen` mode
+
+Serves MCP over TCP instead of stdio. One client at a time (DbgEng is
+single-session by design).
+
+```powershell
+bin\gokd-mcp.exe -listen 127.0.0.1:8765 -log gokd-mcp.log
+```
+
+Then any MCP client that speaks newline-delimited JSON-RPC over a socket can
+connect (`net.Dial` + `mcp.IOTransport` in Go, equivalent in any other
+language). `cmd/gokd-mcp/listen_test.go` has a complete worked example
+(attaches to a freshly-spawned notepad, lists modules, detaches; ~1.5 s).
+
+#### `-remote NODE` mode
+
+> **Note**: `-remote` requires building with `go build -tags remote ./cmd/gokd-mcp`
+> and having `github.com/nijosmsft/lablink` checked out at `..\lablink` next to
+> the gokd repo (see `go.mod`'s `replace` directive). Default builds get a stub
+> that errors out cleanly if `-remote` is passed.
+
+Spawns no DbgEng locally. Instead:
+
+1. Resolves `NODE` against the same `~/.lablink/nodes.json` registry that
+   `LabLinkServer` uses.
+2. Deploys `gokd-mcp.exe` (and any DLLs sitting next to it) to `C:\gokd\` on
+   the node, skipping files whose SHA256 already matches.
+3. Kills any stale `gokd-mcp.exe` on the node, then starts a fresh one with
+   `-listen 127.0.0.1:8765`.
+4. Opens a bidirectional `Forward` gRPC stream to that port via the node's
+   `LabLinkAgent`.
+5. Byte-shuttles stdin ↔ stream ↔ stdout. The Copilot host sees a normal stdio
+   MCP server; the engine runs on the remote node.
+
+Required env vars (same set as `LabLinkServer`):
+
+| Variable | Notes |
+|---|---|
+| `LABLINK_AGENT_TOKEN_FILE` or `LABLINK_AGENT_TOKEN` | Shared auth token |
+| `LABLINK_TRANSPORT` | `mtls` (default in current lab) |
+| `LABLINK_TLS_CA`, `LABLINK_TLS_CERT`, `LABLINK_TLS_KEY` | mTLS material |
+| `LABLINK_NODES` or `LABLINK_HOME` | Registry path; falls back to `~/.lablink/nodes.json` |
+
+Example Copilot config that gets you a single `gokd` MCP server backed by a
+remote node:
+
+```json
+{
+  "mcpServers": {
+    "gokd": {
+      "command": "C:\\git\\gokd\\bin\\gokd-mcp.exe",
+      "args": ["-remote", "RR1N4406-25", "-log", "C:\\git\\gokd\\gokd-mcp-remote.log"],
+      "env": {
+        "LABLINK_AGENT_TOKEN_FILE": "C:\\Users\\you\\.lablink\\agent.token",
+        "LABLINK_TRANSPORT": "mtls",
+        "LABLINK_TLS_CA":   "C:\\Users\\you\\.lablink\\pki\\ca-bundle\\ca.crt",
+        "LABLINK_TLS_CERT": "C:\\Users\\you\\.lablink\\pki\\clients\\default\\client.crt",
+        "LABLINK_TLS_KEY":  "C:\\Users\\you\\.lablink\\pki\\clients\\default\\client.key"
+      }
+    }
+  }
+}
+```
+
+The remote node must already be running `LabLinkAgent` ≥ the version that
+ships the `Forward` RPC (from `github.com/nijosmsft/lablink` head, May 2026
+or later). Older agents will appear to deploy successfully but the engine
+will never come up — the proxy will time out with
+`remote engine did not come up within 15s`.
+
 ## Running tests
 
 `go test ./...` runs the user-mode tests against a freshly-spawned `notepad.exe`.

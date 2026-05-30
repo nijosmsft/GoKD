@@ -84,10 +84,13 @@ cmd/gokd/                     Reference interactive debugger (REPL); stdlib-only
   parse.go                    parseAddr (hex/sym/0x/0d), parseCount (L-prefix)
 
 cmd/gokd-mcp/                 MCP server exposing gokd.Session tools over stdio
-  main.go                     Flag parsing, session setup, MCP server startup
+  main.go                     Flag parsing, transport dispatch (stdio/-listen/-remote)
   tools.go                    MCP tool schemas and handlers
   format.go                   Public API type → JSON-safe MCP output conversion
+  proxy.go                    -remote NODE: stdio<->Forward proxy to remote gokd-mcp
   smoke_test.go               Manual MCP list-tools smoke test (`-tags manual`)
+  e2e_test.go                 Manual: stdio MCP end-to-end against notepad (`-tags manual`)
+  listen_test.go              Manual: -listen mode end-to-end (`-tags manual`)
 
 PLAN.md, README.md, LICENSE
 ```
@@ -176,6 +179,46 @@ indicate working:
 CLI/REPL lives at `cmd/gokd/` (build: `go build -o bin/gokd.exe ./cmd/gokd`).
 Phase 5 lives in this repo at `cmd/gokd-mcp/` (build:
 `go build -o bin/gokd-mcp.exe ./cmd/gokd-mcp`).
+
+## Transport modes for gokd-mcp
+
+`cmd/gokd-mcp` supports three transports, all serving the same 33 MCP tools:
+
+1. **stdio** (default): drives a local DbgEng session, one MCP client over the
+   process's stdin/stdout. Used by every Copilot / Claude Desktop config.
+2. **`-listen ADDR`**: same DbgEng session but served over TCP newline-delimited
+   JSON-RPC. Accepts one client at a time (DbgEng is single-session).
+3. **`-remote NODE`**: does NOT create a local DbgEng session. Instead:
+   - Resolves NODE via lablink registry (`pkg/agentclient`, `pkg/registry`,
+     `pkg/security` — see `C:\git\lablink`).
+   - SHA256-checks then idempotently pushes `gokd-mcp.exe` + DLL bundle to
+     `C:\gokd\` on the node via the lablink agent's `PushFile` RPC.
+   - Starts a fresh remote `gokd-mcp -listen 127.0.0.1:8765` via `Execute`.
+   - Opens one `Forward` gRPC stream targeting that port.
+   - Byte-shuttles local stdin↔stream↔stdout. Copilot sees a normal stdio MCP
+     server; the engine runs on the node.
+
+Implementation lives in `cmd/gokd-mcp/proxy.go`. The lablink dependency uses a
+`replace` directive in `go.mod` pointing at `../lablink` for local
+development. Because lablink hasn't shipped a tagged release yet, the proxy
+code is gated behind a `//go:build remote` tag — default builds get a stub
+(`proxy_stub.go`) that returns an error if `-remote` is passed. To enable
+the real proxy, build with:
+
+```
+go build -tags remote ./cmd/gokd-mcp
+```
+
+(and ensure `..\lablink` is checked out alongside `..\gokd`).
+
+### When to pick which mode
+
+- **Local user-mode debugging**: stdio. Just `-attach PID` or `-create EXE`
+  from a normal Copilot config.
+- **Kernel debugging**: ALWAYS `-remote NODE`. Never run DbgEng's KDNET
+  transport on the operator's workstation — see HANDOFF.md "HARD RULES".
+- **`-listen`** is for power users: testing a custom client, running gokd-mcp
+  as a long-lived service, or being the target of someone else's `-remote`.
 
 ## Conventions
 
