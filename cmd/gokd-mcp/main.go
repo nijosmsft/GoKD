@@ -21,10 +21,12 @@ import (
 )
 
 type config struct {
-	symbols string
-	logPath string
-	listen  string
-	remote  string
+	symbols   string
+	logPath   string
+	listen    string
+	remote    string
+	readonly  bool
+	unsafeRaw bool
 }
 
 func main() {
@@ -71,7 +73,7 @@ func main() {
 			Instructions: "Stateful MCP server for Windows DbgEng debugging through GoKD. Attach or open a target before inspection tools.",
 			Logger:       slog.New(slog.NewTextHandler(logWriter, nil)),
 		})
-		registerTools(s, &srv{sess: sess})
+		registerTools(s, &srv{sess: sess, readonly: cfg.readonly, unsafeRaw: cfg.unsafeRaw})
 		return s
 	}
 
@@ -95,6 +97,8 @@ func parseFlags() config {
 	flag.StringVar(&cfg.logPath, "log", "", "log MCP traffic and engine output to this file")
 	flag.StringVar(&cfg.listen, "listen", "", "serve MCP over TCP instead of stdio, e.g. 127.0.0.1:8765 (one client at a time)")
 	flag.StringVar(&cfg.remote, "remote", "", "run as a stdio proxy to a remote gokd-mcp on the named lablink node")
+	flag.BoolVar(&cfg.readonly, "readonly", false, "reject any tool that can modify the target (writes, breakpoints, execution)")
+	flag.BoolVar(&cfg.unsafeRaw, "unsafe-raw", false, "with --readonly, allow execute_raw but enforce a command denylist")
 	flag.Parse()
 	return cfg
 }

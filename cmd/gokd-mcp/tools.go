@@ -13,7 +13,11 @@ import (
 	"github.com/nijosmsft/gokd"
 )
 
-type srv struct{ sess gokd.Session }
+type srv struct {
+	sess      gokd.Session
+	readonly  bool
+	unsafeRaw bool
+}
 
 type okOutput struct {
 	OK bool `json:"ok"`
@@ -355,14 +359,17 @@ type dumpTypeInput struct {
 }
 
 type typeValueOutput struct {
-	Name       string             `json:"name,omitempty"`
-	TypeName   string             `json:"type_name,omitempty"`
-	AddressHex string             `json:"address_hex"`
-	Size       uint32             `json:"size"`
-	RawHex     string             `json:"raw_hex,omitempty"`
-	Error      string             `json:"error,omitempty"`
-	Decoded    any                `json:"decoded,omitempty"`
-	Children   []*typeValueOutput `json:"children,omitempty"`
+	Name       string `json:"name,omitempty"`
+	TypeName   string `json:"type_name,omitempty"`
+	AddressHex string `json:"address_hex"`
+	Size       uint32 `json:"size"`
+	RawHex     string `json:"raw_hex,omitempty"`
+	Error      string `json:"error,omitempty"`
+	Decoded    any    `json:"decoded,omitempty"`
+	// Children is typed as []any to break the recursive cycle that the
+	// jsonschema-go reflector cannot encode. Each element is in fact a
+	// *typeValueOutput; the JSON shape is unchanged.
+	Children []any `json:"children,omitempty"`
 }
 
 // toolErr returns an MCP error result populated with a structured envelope.
@@ -405,75 +412,82 @@ func contextWithSeconds(parent context.Context, seconds int) (context.Context, c
 }
 
 func registerTools(server *mcp.Server, s *srv) {
-	mcp.AddTool(server, &mcp.Tool{Name: "attach_process", Description: "Attach to a running user-mode process by process ID."}, s.attachProcess)
-	mcp.AddTool(server, &mcp.Tool{Name: "create_process", Description: "Create a user-mode process under the debugger."}, s.createProcess)
-	mcp.AddTool(server, &mcp.Tool{Name: "open_dump", Description: "Open a crash dump file as the current target."}, s.openDump)
-	mcp.AddTool(server, &mcp.Tool{Name: "attach_kernel", Description: "Attach to a kernel target using a DbgEng connection string."}, s.attachKernel)
-	mcp.AddTool(server, &mcp.Tool{Name: "detach", Description: "Detach from the current target."}, s.detach)
-	mcp.AddTool(server, &mcp.Tool{Name: "connect_remote", Description: "Connect to a DbgEng dbgsrv process server."}, s.connectRemote)
-	mcp.AddTool(server, &mcp.Tool{Name: "disconnect_remote", Description: "Disconnect from the current DbgEng process server."}, s.disconnectRemote)
-	mcp.AddTool(server, &mcp.Tool{Name: "get_modules", Description: "List all modules loaded in the current target. Returns base address, size, and name for each module."}, s.getModules)
-	mcp.AddTool(server, &mcp.Tool{Name: "get_threads", Description: "List threads in the current target."}, s.getThreads)
-	mcp.AddTool(server, &mcp.Tool{Name: "set_thread", Description: "Set the current thread by system thread ID."}, s.setThread)
-	mcp.AddTool(server, &mcp.Tool{Name: "get_registers", Description: "Read registers from the current thread; optionally filter by register name."}, s.getRegisters)
-	mcp.AddTool(server, &mcp.Tool{Name: "set_register", Description: "Set a register value in the current thread."}, s.setRegister)
-	mcp.AddTool(server, &mcp.Tool{Name: "get_stack", Description: "Return the current thread stack frames with symbol information."}, s.getStack)
-	mcp.AddTool(server, &mcp.Tool{Name: "read_memory", Description: "Read virtual memory and return hex-encoded bytes."}, s.readMemory)
-	mcp.AddTool(server, &mcp.Tool{Name: "write_memory", Description: "Write hex-encoded bytes to virtual memory."}, s.writeMemory)
-	mcp.AddTool(server, &mcp.Tool{Name: "read_physical", Description: "Read physical memory and return hex-encoded bytes."}, s.readPhysical)
-	mcp.AddTool(server, &mcp.Tool{Name: "disassemble", Description: "Disassemble instructions starting at an address."}, s.disassemble)
-	mcp.AddTool(server, &mcp.Tool{Name: "name_to_addr", Description: "Resolve a symbol name to an address."}, s.nameToAddr)
-	mcp.AddTool(server, &mcp.Tool{Name: "addr_to_name", Description: "Resolve an address to a symbol name and displacement."}, s.addrToName)
-	mcp.AddTool(server, &mcp.Tool{Name: "get_type_fields", Description: "List fields for a type using DbgHelp symbol information."}, s.getTypeFields)
-	mcp.AddTool(server, &mcp.Tool{Name: "get_type_size", Description: "Return the size of a type using DbgHelp symbol information."}, s.getTypeSize)
-	mcp.AddTool(server, &mcp.Tool{Name: "add_breakpoint", Description: "Add a breakpoint by address or symbol expression."}, s.addBreakpoint)
-	mcp.AddTool(server, &mcp.Tool{Name: "remove_breakpoint", Description: "Remove a breakpoint by ID."}, s.removeBreakpoint)
-	mcp.AddTool(server, &mcp.Tool{Name: "enable_breakpoint", Description: "Enable or disable a breakpoint by ID."}, s.enableBreakpoint)
-	mcp.AddTool(server, &mcp.Tool{Name: "list_breakpoints", Description: "List breakpoints in the current target."}, s.listBreakpoints)
-	mcp.AddTool(server, &mcp.Tool{Name: "go_execution", Description: "Continue target execution until a stop event or timeout. Long running."}, s.goExecution)
-	mcp.AddTool(server, &mcp.Tool{Name: "step_in", Description: "Step into one instruction or source line and return the stop event."}, s.stepIn)
-	mcp.AddTool(server, &mcp.Tool{Name: "step_over", Description: "Step over one instruction or source line and return the stop event."}, s.stepOver)
-	mcp.AddTool(server, &mcp.Tool{Name: "step_out", Description: "Step out of the current function and return the stop event."}, s.stepOut)
-	mcp.AddTool(server, &mcp.Tool{Name: "break_in", Description: "Interrupt a running target or long-running go_execution call."}, s.breakIn)
-	mcp.AddTool(server, &mcp.Tool{Name: "get_symbol_path", Description: "Get the current debugger symbol path."}, s.getSymbolPath)
-	mcp.AddTool(server, &mcp.Tool{Name: "set_symbol_path", Description: "Set the debugger symbol path."}, s.setSymbolPath)
-	mcp.AddTool(server, &mcp.Tool{Name: "execute_raw", Description: "WARNING: arbitrary dbgeng command. Use only when other tools are insufficient."}, s.executeRaw)
+	addToolMaybe(s, server, &mcp.Tool{Name: "attach_process", Description: "Attach to a running user-mode process by process ID."}, s.attachProcess)
+	addToolMaybe(s, server, &mcp.Tool{Name: "create_process", Description: "Create a user-mode process under the debugger."}, s.createProcess)
+	addToolMaybe(s, server, &mcp.Tool{Name: "open_dump", Description: "Open a crash dump file as the current target."}, s.openDump)
+	addToolMaybe(s, server, &mcp.Tool{Name: "attach_kernel", Description: "Attach to a kernel target using a DbgEng connection string."}, s.attachKernel)
+	addToolMaybe(s, server, &mcp.Tool{Name: "detach", Description: "Detach from the current target."}, s.detach)
+	addToolMaybe(s, server, &mcp.Tool{Name: "connect_remote", Description: "Connect to a DbgEng dbgsrv process server."}, s.connectRemote)
+	addToolMaybe(s, server, &mcp.Tool{Name: "disconnect_remote", Description: "Disconnect from the current DbgEng process server."}, s.disconnectRemote)
+	addToolMaybe(s, server, &mcp.Tool{Name: "get_modules", Description: "List all modules loaded in the current target. Returns base address, size, and name for each module."}, s.getModules)
+	addToolMaybe(s, server, &mcp.Tool{Name: "get_threads", Description: "List threads in the current target."}, s.getThreads)
+	addToolMaybe(s, server, &mcp.Tool{Name: "set_thread", Description: "Set the current thread by system thread ID."}, s.setThread)
+	addToolMaybe(s, server, &mcp.Tool{Name: "get_registers", Description: "Read registers from the current thread; optionally filter by register name."}, s.getRegisters)
+	addToolMaybe(s, server, &mcp.Tool{Name: "set_register", Description: "Set a register value in the current thread."}, s.setRegister)
+	addToolMaybe(s, server, &mcp.Tool{Name: "get_stack", Description: "Return the current thread stack frames with symbol information."}, s.getStack)
+	addToolMaybe(s, server, &mcp.Tool{Name: "read_memory", Description: "Read virtual memory and return hex-encoded bytes."}, s.readMemory)
+	addToolMaybe(s, server, &mcp.Tool{Name: "write_memory", Description: "Write hex-encoded bytes to virtual memory."}, s.writeMemory)
+	addToolMaybe(s, server, &mcp.Tool{Name: "read_physical", Description: "Read physical memory and return hex-encoded bytes."}, s.readPhysical)
+	addToolMaybe(s, server, &mcp.Tool{Name: "disassemble", Description: "Disassemble instructions starting at an address."}, s.disassemble)
+	addToolMaybe(s, server, &mcp.Tool{Name: "name_to_addr", Description: "Resolve a symbol name to an address."}, s.nameToAddr)
+	addToolMaybe(s, server, &mcp.Tool{Name: "addr_to_name", Description: "Resolve an address to a symbol name and displacement."}, s.addrToName)
+	addToolMaybe(s, server, &mcp.Tool{Name: "get_type_fields", Description: "List fields for a type using DbgHelp symbol information."}, s.getTypeFields)
+	addToolMaybe(s, server, &mcp.Tool{Name: "get_type_size", Description: "Return the size of a type using DbgHelp symbol information."}, s.getTypeSize)
+	addToolMaybe(s, server, &mcp.Tool{Name: "add_breakpoint", Description: "Add a breakpoint by address or symbol expression."}, s.addBreakpoint)
+	addToolMaybe(s, server, &mcp.Tool{Name: "remove_breakpoint", Description: "Remove a breakpoint by ID."}, s.removeBreakpoint)
+	addToolMaybe(s, server, &mcp.Tool{Name: "enable_breakpoint", Description: "Enable or disable a breakpoint by ID."}, s.enableBreakpoint)
+	addToolMaybe(s, server, &mcp.Tool{Name: "list_breakpoints", Description: "List breakpoints in the current target."}, s.listBreakpoints)
+	addToolMaybe(s, server, &mcp.Tool{Name: "go_execution", Description: "Continue target execution until a stop event or timeout. Long running."}, s.goExecution)
+	addToolMaybe(s, server, &mcp.Tool{Name: "step_in", Description: "Step into one instruction or source line and return the stop event."}, s.stepIn)
+	addToolMaybe(s, server, &mcp.Tool{Name: "step_over", Description: "Step over one instruction or source line and return the stop event."}, s.stepOver)
+	addToolMaybe(s, server, &mcp.Tool{Name: "step_out", Description: "Step out of the current function and return the stop event."}, s.stepOut)
+	addToolMaybe(s, server, &mcp.Tool{Name: "break_in", Description: "Interrupt a running target or long-running go_execution call."}, s.breakIn)
+	addToolMaybe(s, server, &mcp.Tool{Name: "get_symbol_path", Description: "Get the current debugger symbol path."}, s.getSymbolPath)
+	addToolMaybe(s, server, &mcp.Tool{Name: "set_symbol_path", Description: "Set the debugger symbol path."}, s.setSymbolPath)
+	if !s.readonly || s.unsafeRaw {
+		execAnnot := &mcp.ToolAnnotations{}
+		dt := true
+		execAnnot.DestructiveHint = &dt
+		ow := true
+		execAnnot.OpenWorldHint = &ow
+		mcp.AddTool(server, &mcp.Tool{Name: "execute_raw", Description: "WARNING: arbitrary dbgeng command. Use only when other tools are insufficient.", Annotations: execAnnot}, s.executeRaw)
+	}
 
 	// --- t1-4 symbol reload / status ---
-	mcp.AddTool(server, &mcp.Tool{Name: "reload_symbols", Description: "Force a symbol reload via IDebugSymbols3::ReloadWide. Use when get_modules reports a deferred symbol_type or after changing set_symbol_path. spec is forwarded verbatim ('', '/f', '/f <module>'). May download from the symbol server — supply timeout_seconds (default 0 = no timeout) to bound the wait. Returns ok=true on success."}, s.reloadSymbols)
-	mcp.AddTool(server, &mcp.Tool{Name: "sym_fix", Description: "Configure the symbol path to the standard Microsoft public-symbol-server cache layout (mirrors WinDbg .symfix). Pass an optional cache directory; empty uses a per-user default. Returns ok=true. Follow with reload_symbols to actually pull PDBs."}, s.symFix)
+	addToolMaybe(s, server, &mcp.Tool{Name: "reload_symbols", Description: "Force a symbol reload via IDebugSymbols3::ReloadWide. Use when get_modules reports a deferred symbol_type or after changing set_symbol_path. spec is forwarded verbatim ('', '/f', '/f <module>'). May download from the symbol server — supply timeout_seconds (default 0 = no timeout) to bound the wait. Returns ok=true on success."}, s.reloadSymbols)
+	addToolMaybe(s, server, &mcp.Tool{Name: "sym_fix", Description: "Configure the symbol path to the standard Microsoft public-symbol-server cache layout (mirrors WinDbg .symfix). Pass an optional cache directory; empty uses a per-user default. Returns ok=true. Follow with reload_symbols to actually pull PDBs."}, s.symFix)
 
 	// --- t1-1 evaluate ---
-	mcp.AddTool(server, &mcp.Tool{Name: "evaluate", Description: "Evaluate a MASM or C++ expression via IDebugControl4::EvaluateWide. Use when you need a typed value from a symbol/arithmetic expression like 'nt!KiSystemServiceStart+0x40' or 'sizeof(_EPROCESS)'. Default syntax is MASM; switch with set_expression_syntax for C++ scope-resolution. May stall on PDB downloads — supply timeout_seconds. Returns type (string), u64 (integer slot), f64 (float slot), raw_hex (24-byte DEBUG_VALUE tail), and remainder (byte index where parsing stopped)."}, s.evaluate)
-	mcp.AddTool(server, &mcp.Tool{Name: "get_radix", Description: "Return the current numeric radix used by evaluate and DbgEng formatting (typically 10 or 16)."}, s.getRadix)
-	mcp.AddTool(server, &mcp.Tool{Name: "set_radix", Description: "Set the numeric radix used by evaluate and DbgEng formatting. Typical values: 10, 16."}, s.setRadix)
-	mcp.AddTool(server, &mcp.Tool{Name: "get_expression_syntax", Description: "Return the current expression-parser syntax ('masm' or 'cpp')."}, s.getExpressionSyntax)
-	mcp.AddTool(server, &mcp.Tool{Name: "set_expression_syntax", Description: "Switch the expression-parser syntax. Accepts 'masm' or 'cpp'. C++ is needed for scope-resolved names like MyClass::Method."}, s.setExpressionSyntax)
+	addToolMaybe(s, server, &mcp.Tool{Name: "evaluate", Description: "Evaluate a MASM or C++ expression via IDebugControl4::EvaluateWide. Use when you need a typed value from a symbol/arithmetic expression like 'nt!KiSystemServiceStart+0x40' or 'sizeof(_EPROCESS)'. Default syntax is MASM; switch with set_expression_syntax for C++ scope-resolution. May stall on PDB downloads — supply timeout_seconds. Returns type (string), u64 (integer slot), f64 (float slot), raw_hex (24-byte DEBUG_VALUE tail), and remainder (byte index where parsing stopped)."}, s.evaluate)
+	addToolMaybe(s, server, &mcp.Tool{Name: "get_radix", Description: "Return the current numeric radix used by evaluate and DbgEng formatting (typically 10 or 16)."}, s.getRadix)
+	addToolMaybe(s, server, &mcp.Tool{Name: "set_radix", Description: "Set the numeric radix used by evaluate and DbgEng formatting. Typical values: 10, 16."}, s.setRadix)
+	addToolMaybe(s, server, &mcp.Tool{Name: "get_expression_syntax", Description: "Return the current expression-parser syntax ('masm' or 'cpp')."}, s.getExpressionSyntax)
+	addToolMaybe(s, server, &mcp.Tool{Name: "set_expression_syntax", Description: "Switch the expression-parser syntax. Accepts 'masm' or 'cpp'. C++ is needed for scope-resolved names like MyClass::Method."}, s.setExpressionSyntax)
 
 	// --- t1-3 source lines ---
-	mcp.AddTool(server, &mcp.Tool{Name: "addr_to_line", Description: "Map an instruction address to its source (file, line, displacement) via IDebugSymbols3::GetLineByOffsetWide. Returns an error containing 'HRESULT 0x80000002' (E_NOTFOUND) when no line info is loaded for the address — install matching PDBs or run reload_symbols first."}, s.addrToLine)
-	mcp.AddTool(server, &mcp.Tool{Name: "line_to_addr", Description: "Map a (file, line) pair to an instruction address via IDebugSymbols3::GetOffsetByLineWide. The file path must be the canonical absolute path the PDB was built with; partial matches fail with E_NOTFOUND."}, s.lineToAddr)
-	mcp.AddTool(server, &mcp.Tool{Name: "add_breakpoint_source_line", Description: "Resolve a (file, line) pair to an address and install a code breakpoint there. Requires line-info PDBs for the target binary; otherwise fails with E_NOTFOUND."}, s.addBreakpointSourceLine)
+	addToolMaybe(s, server, &mcp.Tool{Name: "addr_to_line", Description: "Map an instruction address to its source (file, line, displacement) via IDebugSymbols3::GetLineByOffsetWide. Returns an error containing 'HRESULT 0x80000002' (E_NOTFOUND) when no line info is loaded for the address — install matching PDBs or run reload_symbols first."}, s.addrToLine)
+	addToolMaybe(s, server, &mcp.Tool{Name: "line_to_addr", Description: "Map a (file, line) pair to an instruction address via IDebugSymbols3::GetOffsetByLineWide. The file path must be the canonical absolute path the PDB was built with; partial matches fail with E_NOTFOUND."}, s.lineToAddr)
+	addToolMaybe(s, server, &mcp.Tool{Name: "add_breakpoint_source_line", Description: "Resolve a (file, line) pair to an address and install a code breakpoint there. Requires line-info PDBs for the target binary; otherwise fails with E_NOTFOUND."}, s.addBreakpointSourceLine)
 
 	// --- t1-6 memory search / translate / query ---
-	mcp.AddTool(server, &mcp.Tool{Name: "search_memory", Description: "Scan [start_hex, start_hex+length) for pattern_hex via IDebugDataSpaces4::SearchVirtual. granularity must be 1, 4, or 8 (defaults to 1). Returns {found:false, match_hex:\"\"} when the pattern is not present so callers can loop without exception handling. Keep length small (<= 4 KB) — SearchVirtual is slow on large ranges."}, s.searchMemory)
-	mcp.AddTool(server, &mcp.Tool{Name: "virtual_to_physical", Description: "Translate a virtual address to a physical address via IDebugDataSpaces4::VirtualToPhysical. Kernel-mode sessions only; user-mode targets fail with E_NOTIMPL or similar."}, s.virtualToPhysical)
-	mcp.AddTool(server, &mcp.Tool{Name: "query_region", Description: "Return the MEMORY_BASIC_INFORMATION64 record covering va_hex via IDebugDataSpaces4::QueryVirtual. Fields use raw Windows numerics: state (MEM_COMMIT=0x1000, MEM_RESERVE=0x2000, MEM_FREE=0x10000), type (MEM_PRIVATE=0x20000, MEM_MAPPED=0x40000, MEM_IMAGE=0x1000000), protect (PAGE_* flags)."}, s.queryRegion)
+	addToolMaybe(s, server, &mcp.Tool{Name: "search_memory", Description: "Scan [start_hex, start_hex+length) for pattern_hex via IDebugDataSpaces4::SearchVirtual. granularity must be 1, 4, or 8 (defaults to 1). Returns {found:false, match_hex:\"\"} when the pattern is not present so callers can loop without exception handling. Keep length small (<= 4 KB) — SearchVirtual is slow on large ranges."}, s.searchMemory)
+	addToolMaybe(s, server, &mcp.Tool{Name: "virtual_to_physical", Description: "Translate a virtual address to a physical address via IDebugDataSpaces4::VirtualToPhysical. Kernel-mode sessions only; user-mode targets fail with E_NOTIMPL or similar."}, s.virtualToPhysical)
+	addToolMaybe(s, server, &mcp.Tool{Name: "query_region", Description: "Return the MEMORY_BASIC_INFORMATION64 record covering va_hex via IDebugDataSpaces4::QueryVirtual. Fields use raw Windows numerics: state (MEM_COMMIT=0x1000, MEM_RESERVE=0x2000, MEM_FREE=0x10000), type (MEM_PRIVATE=0x20000, MEM_MAPPED=0x40000, MEM_IMAGE=0x1000000), protect (PAGE_* flags)."}, s.queryRegion)
 
 	// --- t1-2 write dump ---
-	mcp.AddTool(server, &mcp.Tool{Name: "write_dump", Description: "Snapshot the current target to a .dmp file via IDebugClient5::WriteDumpFileWide. path must be absolute. kind is 'small' (1024), 'default' (1025), or 'full' (1026) — defaults to 'default'. flags is the raw DEBUG_FORMAT_USER_SMALL_* bitmask. Synchronous and uncancellable mid-call; default timeout_seconds is 600. Use to capture state for offline analysis."}, s.writeDump)
+	addToolMaybe(s, server, &mcp.Tool{Name: "write_dump", Description: "Snapshot the current target to a .dmp file via IDebugClient5::WriteDumpFileWide. path must be absolute. kind is 'small' (1024), 'default' (1025), or 'full' (1026) — defaults to 'default'. flags is the raw DEBUG_FORMAT_USER_SMALL_* bitmask. Synchronous and uncancellable mid-call; default timeout_seconds is 600. Use to capture state for offline analysis."}, s.writeDump)
 
 	// --- t1-5 data + conditional breakpoints ---
-	mcp.AddTool(server, &mcp.Tool{Name: "add_data_breakpoint", Description: "Install a hardware ('break-on-access') breakpoint at address_hex covering size bytes. size must be 1, 2, 4, or 8. access is any non-empty subset of ['read', 'write', 'execute', 'io']. x64 hardware supports at most four enabled data breakpoints concurrently — the fifth will fail at the next go_execution call."}, s.addDataBreakpoint)
-	mcp.AddTool(server, &mcp.Tool{Name: "configure_breakpoint", Description: "Apply non-positional configuration (pass count, thread filter, WinDbg command) to an existing breakpoint without recreating it. Each field is independently optional: pass_count=0 leaves existing alone; omit match_thread_id to leave alone or pass 0xFFFFFFFF for 'any thread'; omit command to leave alone, pass empty string to clear."}, s.configureBreakpoint)
-	mcp.AddTool(server, &mcp.Tool{Name: "breakpoint_command", Description: "Return the WinDbg command string attached to a breakpoint (empty if none)."}, s.breakpointCommand)
+	addToolMaybe(s, server, &mcp.Tool{Name: "add_data_breakpoint", Description: "Install a hardware ('break-on-access') breakpoint at address_hex covering size bytes. size must be 1, 2, 4, or 8. access is any non-empty subset of ['read', 'write', 'execute', 'io']. x64 hardware supports at most four enabled data breakpoints concurrently — the fifth will fail at the next go_execution call."}, s.addDataBreakpoint)
+	addToolMaybe(s, server, &mcp.Tool{Name: "configure_breakpoint", Description: "Apply non-positional configuration (pass count, thread filter, WinDbg command) to an existing breakpoint without recreating it. Each field is independently optional: pass_count=0 leaves existing alone; omit match_thread_id to leave alone or pass 0xFFFFFFFF for 'any thread'; omit command to leave alone, pass empty string to clear."}, s.configureBreakpoint)
+	addToolMaybe(s, server, &mcp.Tool{Name: "breakpoint_command", Description: "Return the WinDbg command string attached to a breakpoint (empty if none)."}, s.breakpointCommand)
 
 	// --- t1-8 last event / bugcheck ---
-	mcp.AddTool(server, &mcp.Tool{Name: "last_exception", Description: "Return the most recent DEBUG_EVENT_EXCEPTION record reported by DbgEng (the .lastevent / .exr surface). Returns {found:false} when the last event was not an exception — e.g. an attach breakpoint or a process-exit notification. parameters carries raw EXCEPTION_RECORD.ExceptionInformation values (e.g. for access violations [0] is the read/write/execute flag and [1] is the faulting VA)."}, s.lastException)
-	mcp.AddTool(server, &mcp.Tool{Name: "bug_check", Description: "Read the kernel bugcheck record via IDebugControl4::ReadBugCheckData. Kernel-mode sessions only — user-mode targets return {found:false}. name and description are best-effort lookups for ~20 common codes; unknown codes still surface the raw code and four args."}, s.bugCheck)
+	addToolMaybe(s, server, &mcp.Tool{Name: "last_exception", Description: "Return the most recent DEBUG_EVENT_EXCEPTION record reported by DbgEng (the .lastevent / .exr surface). Returns {found:false} when the last event was not an exception — e.g. an attach breakpoint or a process-exit notification. parameters carries raw EXCEPTION_RECORD.ExceptionInformation values (e.g. for access violations [0] is the read/write/execute flag and [1] is the faulting VA)."}, s.lastException)
+	addToolMaybe(s, server, &mcp.Tool{Name: "bug_check", Description: "Read the kernel bugcheck record via IDebugControl4::ReadBugCheckData. Kernel-mode sessions only — user-mode targets return {found:false}. name and description are best-effort lookups for ~20 common codes; unknown codes still surface the raw code and four args."}, s.bugCheck)
 
 	// --- t1-7 dump type ---
-	mcp.AddTool(server, &mcp.Tool{Name: "dump_type", Description: "Walk a typed object recursively (the 'dt -r' surface). Resolves type in module's symbol namespace, reads address_hex as that type, and recurses into struct fields up to max_depth levels (default 3). follow_ptrs dereferences non-NULL pointer fields one extra level with cycle detection. Special decoders surface human-readable values for _UNICODE_STRING (string), _LIST_ENTRY (Flink/Blink), GUID, and _LARGE_INTEGER. Requires PDBs that carry the requested type — public-symbol-only PDBs typically do NOT include OS structures like _PEB."}, s.dumpType)
+	addToolMaybe(s, server, &mcp.Tool{Name: "dump_type", Description: "Walk a typed object recursively (the 'dt -r' surface). Resolves type in module's symbol namespace, reads address_hex as that type, and recurses into struct fields up to max_depth levels (default 3). follow_ptrs dereferences non-NULL pointer fields one extra level with cycle detection. Special decoders surface human-readable values for _UNICODE_STRING (string), _LIST_ENTRY (Flink/Blink), GUID, and _LARGE_INTEGER. Requires PDBs that carry the requested type — public-symbol-only PDBs typically do NOT include OS structures like _PEB."}, s.dumpType)
 }
 
 func (s *srv) attachProcess(ctx context.Context, _ *mcp.CallToolRequest, in attachProcessInput) (*mcp.CallToolResult, okOutput, error) {
@@ -921,6 +935,10 @@ func (s *srv) setSymbolPath(ctx context.Context, _ *mcp.CallToolRequest, in symb
 func (s *srv) executeRaw(ctx context.Context, _ *mcp.CallToolRequest, in executeRawInput) (*mcp.CallToolResult, executeRawOutput, error) {
 	if err := checkContext(ctx); err != nil {
 		return toolErr[executeRawOutput]("execute_raw", err)
+	}
+	if s.readonly && denyRawCommand(in.Command) {
+		return toolErr[executeRawOutput]("execute_raw",
+			fmt.Errorf("command %q rejected by readonly denylist", firstToken(in.Command)))
 	}
 	out, err := s.sess.Execute(in.Command)
 	if err != nil {
