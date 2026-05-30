@@ -365,9 +365,23 @@ type typeValueOutput struct {
 	Children   []*typeValueOutput `json:"children,omitempty"`
 }
 
-func toolErr[Out any](err error) (*mcp.CallToolResult, Out, error) {
+// toolErr returns an MCP error result populated with a structured envelope.
+// op identifies the calling tool ("attach_process", "read_memory", ...) so
+// the envelope can include canonical follow-up tools.
+//
+// The envelope is encoded as a second TextContent block on the returned
+// CallToolResult: the SDK's ToolHandlerFor wrapper overwrites
+// StructuredContent with the marshaled zero Out value, so we cannot ship
+// the envelope through StructuredContent without changing every Out type.
+// Clients that read Content will see [message, json]; non-structured
+// clients still get the human-readable message in the first block.
+func toolErr[Out any](op string, err error) (*mcp.CallToolResult, Out, error) {
 	var zero Out
-	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, zero, nil
+	env := wrapErr(op, err)
+	return &mcp.CallToolResult{
+		IsError: true,
+		Content: envelopeContent(env),
+	}, zero, nil
 }
 
 func checkContext(ctx context.Context) error {
@@ -464,36 +478,36 @@ func registerTools(server *mcp.Server, s *srv) {
 
 func (s *srv) attachProcess(ctx context.Context, _ *mcp.CallToolRequest, in attachProcessInput) (*mcp.CallToolResult, okOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("attach_process", err)
 	}
 	if err := s.sess.AttachProcess(in.PID, gokd.AttachDefault); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("attach_process", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
 
 func (s *srv) createProcess(ctx context.Context, _ *mcp.CallToolRequest, in createProcessInput) (*mcp.CallToolResult, okOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("create_process", err)
 	}
 	if strings.TrimSpace(in.CommandLine) == "" {
-		return toolErr[okOutput](fmt.Errorf("command_line is required"))
+		return toolErr[okOutput]("create_process", fmt.Errorf("command_line is required"))
 	}
 	if err := s.sess.CreateProcess(in.CommandLine, gokd.CreateOptions{Flags: 1, InitialBreak: in.InitialBreak}); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("create_process", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
 
 func (s *srv) openDump(ctx context.Context, _ *mcp.CallToolRequest, in pathInput) (*mcp.CallToolResult, okOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("open_dump", err)
 	}
 	if strings.TrimSpace(in.Path) == "" {
-		return toolErr[okOutput](fmt.Errorf("path is required"))
+		return toolErr[okOutput]("open_dump", fmt.Errorf("path is required"))
 	}
 	if err := s.sess.OpenDump(in.Path); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("open_dump", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
@@ -501,7 +515,7 @@ func (s *srv) openDump(ctx context.Context, _ *mcp.CallToolRequest, in pathInput
 func (s *srv) attachKernel(ctx context.Context, _ *mcp.CallToolRequest, in attachKernelInput) (*mcp.CallToolResult, okOutput, error) {
 	ctx, cancel, err := contextWithSeconds(ctx, in.TimeoutSeconds)
 	if err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("attach_kernel", err)
 	}
 	defer cancel()
 	opts := gokd.KernelDefault
@@ -509,54 +523,54 @@ func (s *srv) attachKernel(ctx context.Context, _ *mcp.CallToolRequest, in attac
 		opts = gokd.KernelPassive
 	}
 	if strings.TrimSpace(in.ConnectionString) == "" {
-		return toolErr[okOutput](fmt.Errorf("connection_string is required"))
+		return toolErr[okOutput]("attach_kernel", fmt.Errorf("connection_string is required"))
 	}
 	if err := s.sess.AttachKernel(ctx, in.ConnectionString, opts); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("attach_kernel", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
 
 func (s *srv) detach(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, okOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("detach", err)
 	}
 	if err := s.sess.Detach(); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("detach", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
 
 func (s *srv) connectRemote(ctx context.Context, _ *mcp.CallToolRequest, in connectionInput) (*mcp.CallToolResult, okOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("connect_remote", err)
 	}
 	if strings.TrimSpace(in.Connection) == "" {
-		return toolErr[okOutput](fmt.Errorf("connection is required"))
+		return toolErr[okOutput]("connect_remote", fmt.Errorf("connection is required"))
 	}
 	if err := s.sess.ConnectRemote(in.Connection); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("connect_remote", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
 
 func (s *srv) disconnectRemote(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, okOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("disconnect_remote", err)
 	}
 	if err := s.sess.DisconnectRemote(); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("disconnect_remote", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
 
 func (s *srv) getModules(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, modulesOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[modulesOutput](err)
+		return toolErr[modulesOutput]("get_modules", err)
 	}
 	mods, err := s.sess.Modules()
 	if err != nil {
-		return toolErr[modulesOutput](err)
+		return toolErr[modulesOutput]("get_modules", err)
 	}
 	out := make([]Module, len(mods))
 	for i, m := range mods {
@@ -567,11 +581,11 @@ func (s *srv) getModules(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}
 
 func (s *srv) getThreads(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, threadsOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[threadsOutput](err)
+		return toolErr[threadsOutput]("get_threads", err)
 	}
 	threads, err := s.sess.Threads()
 	if err != nil {
-		return toolErr[threadsOutput](err)
+		return toolErr[threadsOutput]("get_threads", err)
 	}
 	out := make([]Thread, len(threads))
 	for i, t := range threads {
@@ -582,21 +596,21 @@ func (s *srv) getThreads(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}
 
 func (s *srv) setThread(ctx context.Context, _ *mcp.CallToolRequest, in setThreadInput) (*mcp.CallToolResult, okOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("set_thread", err)
 	}
 	if err := s.sess.SetThread(in.SystemID); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("set_thread", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
 
 func (s *srv) getRegisters(ctx context.Context, _ *mcp.CallToolRequest, in getRegistersInput) (*mcp.CallToolResult, registersOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[registersOutput](err)
+		return toolErr[registersOutput]("get_registers", err)
 	}
 	regs, err := s.sess.Registers()
 	if err != nil {
-		return toolErr[registersOutput](err)
+		return toolErr[registersOutput]("get_registers", err)
 	}
 	out := map[string]string{}
 	if len(in.Names) == 0 {
@@ -621,25 +635,25 @@ func (s *srv) getRegisters(ctx context.Context, _ *mcp.CallToolRequest, in getRe
 
 func (s *srv) setRegister(ctx context.Context, _ *mcp.CallToolRequest, in setRegisterInput) (*mcp.CallToolResult, okOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("set_register", err)
 	}
 	value, err := strconv.ParseUint(strings.TrimSpace(in.ValueHex), 0, 64)
 	if err != nil {
-		return toolErr[okOutput](fmt.Errorf("invalid value_hex: %w", err))
+		return toolErr[okOutput]("set_register", fmt.Errorf("invalid value_hex: %w", err))
 	}
 	if err := s.sess.SetRegister(in.Name, value); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("set_register", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
 
 func (s *srv) getStack(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, stackOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[stackOutput](err)
+		return toolErr[stackOutput]("get_stack", err)
 	}
 	frames, err := s.sess.Stack()
 	if err != nil {
-		return toolErr[stackOutput](err)
+		return toolErr[stackOutput]("get_stack", err)
 	}
 	out := make([]Frame, len(frames))
 	for i, f := range frames {
@@ -650,70 +664,70 @@ func (s *srv) getStack(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) 
 
 func (s *srv) readMemory(ctx context.Context, _ *mcp.CallToolRequest, in readMemoryInput) (*mcp.CallToolResult, hexOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[hexOutput](err)
+		return toolErr[hexOutput]("read_memory", err)
 	}
 	addr, err := parseHexUint64(in.AddressHex, "address_hex")
 	if err != nil {
-		return toolErr[hexOutput](err)
+		return toolErr[hexOutput]("read_memory", err)
 	}
 	data, err := s.sess.ReadMemory(addr, in.Length)
 	if err != nil {
-		return toolErr[hexOutput](err)
+		return toolErr[hexOutput]("read_memory", err)
 	}
 	return nil, hexOutput{Hex: hex.EncodeToString(data)}, nil
 }
 
 func (s *srv) writeMemory(ctx context.Context, _ *mcp.CallToolRequest, in writeMemoryInput) (*mcp.CallToolResult, writeMemoryOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[writeMemoryOutput](err)
+		return toolErr[writeMemoryOutput]("write_memory", err)
 	}
 	addr, err := parseHexUint64(in.AddressHex, "address_hex")
 	if err != nil {
-		return toolErr[writeMemoryOutput](err)
+		return toolErr[writeMemoryOutput]("write_memory", err)
 	}
 	data, err := hex.DecodeString(strings.TrimSpace(in.Hex))
 	if err != nil {
-		return toolErr[writeMemoryOutput](fmt.Errorf("invalid hex: %w", err))
+		return toolErr[writeMemoryOutput]("write_memory", fmt.Errorf("invalid hex: %w", err))
 	}
 	if err := s.sess.WriteMemory(addr, data); err != nil {
-		return toolErr[writeMemoryOutput](err)
+		return toolErr[writeMemoryOutput]("write_memory", err)
 	}
 	return nil, writeMemoryOutput{OK: true, BytesWritten: len(data)}, nil
 }
 
 func (s *srv) readPhysical(ctx context.Context, _ *mcp.CallToolRequest, in readPhysicalInput) (*mcp.CallToolResult, hexOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[hexOutput](err)
+		return toolErr[hexOutput]("read_physical", err)
 	}
 	addr, err := parseHexUint64(in.AddressHex, "address_hex")
 	if err != nil {
-		return toolErr[hexOutput](err)
+		return toolErr[hexOutput]("read_physical", err)
 	}
 	data, err := s.sess.ReadPhysical(addr, in.Length)
 	if err != nil {
-		return toolErr[hexOutput](err)
+		return toolErr[hexOutput]("read_physical", err)
 	}
 	return nil, hexOutput{Hex: hex.EncodeToString(data)}, nil
 }
 
 func (s *srv) disassemble(ctx context.Context, _ *mcp.CallToolRequest, in disassembleInput) (*mcp.CallToolResult, disassembleOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[disassembleOutput](err)
+		return toolErr[disassembleOutput]("disassemble", err)
 	}
 	addr, err := parseHexUint64(in.AddressHex, "address_hex")
 	if err != nil {
-		return toolErr[disassembleOutput](err)
+		return toolErr[disassembleOutput]("disassemble", err)
 	}
 	count := in.Count
 	if count == 0 {
 		count = 8
 	}
 	if count < 0 {
-		return toolErr[disassembleOutput](fmt.Errorf("count must be >= 0"))
+		return toolErr[disassembleOutput]("disassemble", fmt.Errorf("count must be >= 0"))
 	}
 	ins, err := s.sess.DisassembleRange(addr, count)
 	if err != nil {
-		return toolErr[disassembleOutput](err)
+		return toolErr[disassembleOutput]("disassemble", err)
 	}
 	out := make([]Instruction, len(ins))
 	for i, inst := range ins {
@@ -724,37 +738,37 @@ func (s *srv) disassemble(ctx context.Context, _ *mcp.CallToolRequest, in disass
 
 func (s *srv) nameToAddr(ctx context.Context, _ *mcp.CallToolRequest, in nameInput) (*mcp.CallToolResult, nameToAddrOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[nameToAddrOutput](err)
+		return toolErr[nameToAddrOutput]("name_to_addr", err)
 	}
 	addr, err := s.sess.NameToAddr(in.Name)
 	if err != nil {
-		return toolErr[nameToAddrOutput](err)
+		return toolErr[nameToAddrOutput]("name_to_addr", err)
 	}
 	return nil, nameToAddrOutput{AddressHex: hex64(addr)}, nil
 }
 
 func (s *srv) addrToName(ctx context.Context, _ *mcp.CallToolRequest, in addrInput) (*mcp.CallToolResult, addrToNameOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[addrToNameOutput](err)
+		return toolErr[addrToNameOutput]("addr_to_name", err)
 	}
 	addr, err := parseHexUint64(in.AddressHex, "address_hex")
 	if err != nil {
-		return toolErr[addrToNameOutput](err)
+		return toolErr[addrToNameOutput]("addr_to_name", err)
 	}
 	name, disp, err := s.sess.AddrToName(addr)
 	if err != nil {
-		return toolErr[addrToNameOutput](err)
+		return toolErr[addrToNameOutput]("addr_to_name", err)
 	}
 	return nil, addrToNameOutput{Name: name, Displacement: disp}, nil
 }
 
 func (s *srv) getTypeFields(ctx context.Context, _ *mcp.CallToolRequest, in typeInput) (*mcp.CallToolResult, fieldsOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[fieldsOutput](err)
+		return toolErr[fieldsOutput]("get_type_fields", err)
 	}
 	fields, err := s.sess.TypeFields(in.Module, in.TypeName)
 	if err != nil {
-		return toolErr[fieldsOutput](err)
+		return toolErr[fieldsOutput]("get_type_fields", err)
 	}
 	out := make([]Field, len(fields))
 	for i, f := range fields {
@@ -765,23 +779,23 @@ func (s *srv) getTypeFields(ctx context.Context, _ *mcp.CallToolRequest, in type
 
 func (s *srv) getTypeSize(ctx context.Context, _ *mcp.CallToolRequest, in typeInput) (*mcp.CallToolResult, typeSizeOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[typeSizeOutput](err)
+		return toolErr[typeSizeOutput]("get_type_size", err)
 	}
 	size, err := s.sess.TypeSize(in.Module, in.TypeName)
 	if err != nil {
-		return toolErr[typeSizeOutput](err)
+		return toolErr[typeSizeOutput]("get_type_size", err)
 	}
 	return nil, typeSizeOutput{Size: size}, nil
 }
 
 func (s *srv) addBreakpoint(ctx context.Context, _ *mcp.CallToolRequest, in addBreakpointInput) (*mcp.CallToolResult, addBreakpointOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[addBreakpointOutput](err)
+		return toolErr[addBreakpointOutput]("add_breakpoint", err)
 	}
 	hasAddr := strings.TrimSpace(in.AddressHex) != ""
 	hasSym := strings.TrimSpace(in.Symbol) != ""
 	if hasAddr == hasSym {
-		return toolErr[addBreakpointOutput](fmt.Errorf("set exactly one of address_hex or symbol"))
+		return toolErr[addBreakpointOutput]("add_breakpoint", fmt.Errorf("set exactly one of address_hex or symbol"))
 	}
 	var (
 		bp   *gokd.Breakpoint
@@ -791,14 +805,14 @@ func (s *srv) addBreakpoint(ctx context.Context, _ *mcp.CallToolRequest, in addB
 	if hasAddr {
 		addr, err = parseHexUint64(in.AddressHex, "address_hex")
 		if err != nil {
-			return toolErr[addBreakpointOutput](err)
+			return toolErr[addBreakpointOutput]("add_breakpoint", err)
 		}
 		bp, err = s.sess.AddBreakpoint(addr)
 	} else {
 		bp, err = s.sess.AddBreakpointSym(in.Symbol)
 	}
 	if err != nil {
-		return toolErr[addBreakpointOutput](err)
+		return toolErr[addBreakpointOutput]("add_breakpoint", err)
 	}
 	resultAddr := bp.Address
 	if resultAddr == 0 && hasSym {
@@ -811,31 +825,31 @@ func (s *srv) addBreakpoint(ctx context.Context, _ *mcp.CallToolRequest, in addB
 
 func (s *srv) removeBreakpoint(ctx context.Context, _ *mcp.CallToolRequest, in breakpointIDInput) (*mcp.CallToolResult, okOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("remove_breakpoint", err)
 	}
 	if err := s.sess.RemoveBreakpoint(in.ID); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("remove_breakpoint", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
 
 func (s *srv) enableBreakpoint(ctx context.Context, _ *mcp.CallToolRequest, in enableBreakpointInput) (*mcp.CallToolResult, okOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("enable_breakpoint", err)
 	}
 	if err := s.sess.EnableBreakpoint(in.ID, in.Enabled); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("enable_breakpoint", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
 
 func (s *srv) listBreakpoints(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, breakpointsOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[breakpointsOutput](err)
+		return toolErr[breakpointsOutput]("list_breakpoints", err)
 	}
 	bps, err := s.sess.Breakpoints()
 	if err != nil {
-		return toolErr[breakpointsOutput](err)
+		return toolErr[breakpointsOutput]("list_breakpoints", err)
 	}
 	out := make([]Breakpoint, len(bps))
 	for i, bp := range bps {
@@ -844,73 +858,73 @@ func (s *srv) listBreakpoints(ctx context.Context, _ *mcp.CallToolRequest, _ str
 	return nil, breakpointsOutput{Breakpoints: out}, nil
 }
 
-func (s *srv) runExecution(ctx context.Context, in executionInput, fn func(context.Context) (*gokd.StopEvent, error)) (*mcp.CallToolResult, stopOutput, error) {
+func (s *srv) runExecution(ctx context.Context, op string, in executionInput, fn func(context.Context) (*gokd.StopEvent, error)) (*mcp.CallToolResult, stopOutput, error) {
 	ctx, cancel, err := contextWithSeconds(ctx, in.TimeoutSeconds)
 	if err != nil {
-		return toolErr[stopOutput](err)
+		return toolErr[stopOutput](op, err)
 	}
 	defer cancel()
 	ev, err := fn(ctx)
 	if err != nil {
-		return toolErr[stopOutput](err)
+		return toolErr[stopOutput](op, err)
 	}
 	return nil, stopOutput{Stop: formatStopEvent(ev)}, nil
 }
 
 func (s *srv) goExecution(ctx context.Context, _ *mcp.CallToolRequest, in executionInput) (*mcp.CallToolResult, stopOutput, error) {
-	return s.runExecution(ctx, in, s.sess.Go)
+	return s.runExecution(ctx, "go", in, s.sess.Go)
 }
 
 func (s *srv) stepIn(ctx context.Context, _ *mcp.CallToolRequest, in executionInput) (*mcp.CallToolResult, stopOutput, error) {
-	return s.runExecution(ctx, in, s.sess.StepIn)
+	return s.runExecution(ctx, "step_in", in, s.sess.StepIn)
 }
 
 func (s *srv) stepOver(ctx context.Context, _ *mcp.CallToolRequest, in executionInput) (*mcp.CallToolResult, stopOutput, error) {
-	return s.runExecution(ctx, in, s.sess.StepOver)
+	return s.runExecution(ctx, "step_over", in, s.sess.StepOver)
 }
 
 func (s *srv) stepOut(ctx context.Context, _ *mcp.CallToolRequest, in executionInput) (*mcp.CallToolResult, stopOutput, error) {
-	return s.runExecution(ctx, in, s.sess.StepOut)
+	return s.runExecution(ctx, "step_out", in, s.sess.StepOut)
 }
 
 func (s *srv) breakIn(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, okOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("break_in", err)
 	}
 	if err := s.sess.BreakIn(); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("break_in", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
 
 func (s *srv) getSymbolPath(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, symbolPathOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[symbolPathOutput](err)
+		return toolErr[symbolPathOutput]("get_symbol_path", err)
 	}
 	path, err := s.sess.SymbolPath()
 	if err != nil {
-		return toolErr[symbolPathOutput](err)
+		return toolErr[symbolPathOutput]("get_symbol_path", err)
 	}
 	return nil, symbolPathOutput{Path: path}, nil
 }
 
 func (s *srv) setSymbolPath(ctx context.Context, _ *mcp.CallToolRequest, in symbolPathInput) (*mcp.CallToolResult, okOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("set_symbol_path", err)
 	}
 	if err := s.sess.SetSymbolPath(in.Path); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("set_symbol_path", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
 
 func (s *srv) executeRaw(ctx context.Context, _ *mcp.CallToolRequest, in executeRawInput) (*mcp.CallToolResult, executeRawOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[executeRawOutput](err)
+		return toolErr[executeRawOutput]("execute_raw", err)
 	}
 	out, err := s.sess.Execute(in.Command)
 	if err != nil {
-		return toolErr[executeRawOutput](err)
+		return toolErr[executeRawOutput]("execute_raw", err)
 	}
 	return nil, executeRawOutput{Output: out}, nil
 }
@@ -920,21 +934,21 @@ func (s *srv) executeRaw(ctx context.Context, _ *mcp.CallToolRequest, in execute
 func (s *srv) reloadSymbols(ctx context.Context, _ *mcp.CallToolRequest, in reloadSymbolsInput) (*mcp.CallToolResult, okOutput, error) {
 	ctx, cancel, err := contextWithSeconds(ctx, in.TimeoutSeconds)
 	if err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("reload_symbols", err)
 	}
 	defer cancel()
 	if err := s.sess.ReloadSymbols(ctx, in.Spec); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("reload_symbols", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
 
 func (s *srv) symFix(ctx context.Context, _ *mcp.CallToolRequest, in symFixInput) (*mcp.CallToolResult, okOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("sym_fix", err)
 	}
 	if err := s.sess.SymFix(in.Cache); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("sym_fix", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
@@ -943,20 +957,20 @@ func (s *srv) symFix(ctx context.Context, _ *mcp.CallToolRequest, in symFixInput
 
 func (s *srv) evaluate(ctx context.Context, _ *mcp.CallToolRequest, in evaluateInput) (*mcp.CallToolResult, evaluateOutput, error) {
 	if strings.TrimSpace(in.Expr) == "" {
-		return toolErr[evaluateOutput](fmt.Errorf("expr is required"))
+		return toolErr[evaluateOutput]("evaluate", fmt.Errorf("expr is required"))
 	}
 	kind, ok := gokd.ParseValueKind(in.DesiredType)
 	if !ok {
-		return toolErr[evaluateOutput](fmt.Errorf("invalid desired_type: %q", in.DesiredType))
+		return toolErr[evaluateOutput]("evaluate", fmt.Errorf("invalid desired_type: %q", in.DesiredType))
 	}
 	ctx, cancel, err := contextWithSeconds(ctx, in.TimeoutSeconds)
 	if err != nil {
-		return toolErr[evaluateOutput](err)
+		return toolErr[evaluateOutput]("evaluate", err)
 	}
 	defer cancel()
 	v, rem, err := s.sess.Evaluate(ctx, in.Expr, kind)
 	if err != nil {
-		return toolErr[evaluateOutput](err)
+		return toolErr[evaluateOutput]("evaluate", err)
 	}
 	tname, u64, f64, rawHex := formatValue(v)
 	return nil, evaluateOutput{Type: tname, U64: u64, F64: f64, RawHex: rawHex, Remainder: rem}, nil
@@ -964,32 +978,32 @@ func (s *srv) evaluate(ctx context.Context, _ *mcp.CallToolRequest, in evaluateI
 
 func (s *srv) getRadix(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, radixOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[radixOutput](err)
+		return toolErr[radixOutput]("get_radix", err)
 	}
 	r, err := s.sess.Radix()
 	if err != nil {
-		return toolErr[radixOutput](err)
+		return toolErr[radixOutput]("get_radix", err)
 	}
 	return nil, radixOutput{Radix: r}, nil
 }
 
 func (s *srv) setRadix(ctx context.Context, _ *mcp.CallToolRequest, in setRadixInput) (*mcp.CallToolResult, okOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("set_radix", err)
 	}
 	if err := s.sess.SetRadix(in.Radix); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("set_radix", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
 
 func (s *srv) getExpressionSyntax(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, expressionSyntaxOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[expressionSyntaxOutput](err)
+		return toolErr[expressionSyntaxOutput]("get_expression_syntax", err)
 	}
 	syn, err := s.sess.ExpressionSyntax()
 	if err != nil {
-		return toolErr[expressionSyntaxOutput](err)
+		return toolErr[expressionSyntaxOutput]("get_expression_syntax", err)
 	}
 	name := "masm"
 	if syn == gokd.ExpressionSyntaxCPP {
@@ -1000,7 +1014,7 @@ func (s *srv) getExpressionSyntax(ctx context.Context, _ *mcp.CallToolRequest, _
 
 func (s *srv) setExpressionSyntax(ctx context.Context, _ *mcp.CallToolRequest, in setExpressionSyntaxInput) (*mcp.CallToolResult, okOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("set_expression_syntax", err)
 	}
 	var syn gokd.ExpressionSyntax
 	switch strings.ToLower(strings.TrimSpace(in.Syntax)) {
@@ -1009,10 +1023,10 @@ func (s *srv) setExpressionSyntax(ctx context.Context, _ *mcp.CallToolRequest, i
 	case "cpp", "c++":
 		syn = gokd.ExpressionSyntaxCPP
 	default:
-		return toolErr[okOutput](fmt.Errorf("invalid syntax: %q (want 'masm' or 'cpp')", in.Syntax))
+		return toolErr[okOutput]("set_expression_syntax", fmt.Errorf("invalid syntax: %q (want 'masm' or 'cpp')", in.Syntax))
 	}
 	if err := s.sess.SetExpressionSyntax(syn); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("set_expression_syntax", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
@@ -1021,49 +1035,49 @@ func (s *srv) setExpressionSyntax(ctx context.Context, _ *mcp.CallToolRequest, i
 
 func (s *srv) addrToLine(ctx context.Context, _ *mcp.CallToolRequest, in addrToLineInput) (*mcp.CallToolResult, addrToLineOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[addrToLineOutput](err)
+		return toolErr[addrToLineOutput]("addr_to_line", err)
 	}
 	addr, err := parseHexUint64(in.AddressHex, "address_hex")
 	if err != nil {
-		return toolErr[addrToLineOutput](err)
+		return toolErr[addrToLineOutput]("addr_to_line", err)
 	}
 	sl, err := s.sess.AddrToLine(addr)
 	if err != nil {
-		return toolErr[addrToLineOutput](err)
+		return toolErr[addrToLineOutput]("addr_to_line", err)
 	}
 	return nil, addrToLineOutput{File: sl.File, Line: sl.Line, Displacement: sl.Displacement}, nil
 }
 
 func (s *srv) lineToAddr(ctx context.Context, _ *mcp.CallToolRequest, in lineToAddrInput) (*mcp.CallToolResult, lineToAddrOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[lineToAddrOutput](err)
+		return toolErr[lineToAddrOutput]("line_to_addr", err)
 	}
 	if strings.TrimSpace(in.File) == "" {
-		return toolErr[lineToAddrOutput](fmt.Errorf("file is required"))
+		return toolErr[lineToAddrOutput]("line_to_addr", fmt.Errorf("file is required"))
 	}
 	if in.Line == 0 {
-		return toolErr[lineToAddrOutput](fmt.Errorf("line must be >= 1"))
+		return toolErr[lineToAddrOutput]("line_to_addr", fmt.Errorf("line must be >= 1"))
 	}
 	addr, err := s.sess.LineToAddr(in.File, in.Line)
 	if err != nil {
-		return toolErr[lineToAddrOutput](err)
+		return toolErr[lineToAddrOutput]("line_to_addr", err)
 	}
 	return nil, lineToAddrOutput{AddressHex: hex64(addr)}, nil
 }
 
 func (s *srv) addBreakpointSourceLine(ctx context.Context, _ *mcp.CallToolRequest, in addBreakpointSourceLineInput) (*mcp.CallToolResult, addBreakpointOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[addBreakpointOutput](err)
+		return toolErr[addBreakpointOutput]("add_breakpoint_source_line", err)
 	}
 	if strings.TrimSpace(in.File) == "" {
-		return toolErr[addBreakpointOutput](fmt.Errorf("file is required"))
+		return toolErr[addBreakpointOutput]("add_breakpoint_source_line", fmt.Errorf("file is required"))
 	}
 	if in.Line == 0 {
-		return toolErr[addBreakpointOutput](fmt.Errorf("line must be >= 1"))
+		return toolErr[addBreakpointOutput]("add_breakpoint_source_line", fmt.Errorf("line must be >= 1"))
 	}
 	bp, err := s.sess.AddBreakpointSourceLine(in.File, in.Line)
 	if err != nil {
-		return toolErr[addBreakpointOutput](err)
+		return toolErr[addBreakpointOutput]("add_breakpoint_source_line", err)
 	}
 	addr := uint64(0)
 	if bp != nil {
@@ -1076,18 +1090,18 @@ func (s *srv) addBreakpointSourceLine(ctx context.Context, _ *mcp.CallToolReques
 
 func (s *srv) searchMemory(ctx context.Context, _ *mcp.CallToolRequest, in searchMemoryInput) (*mcp.CallToolResult, searchMemoryOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[searchMemoryOutput](err)
+		return toolErr[searchMemoryOutput]("search_memory", err)
 	}
 	start, err := parseHexUint64(in.StartHex, "start_hex")
 	if err != nil {
-		return toolErr[searchMemoryOutput](err)
+		return toolErr[searchMemoryOutput]("search_memory", err)
 	}
 	if in.Length == 0 {
-		return toolErr[searchMemoryOutput](fmt.Errorf("length must be > 0"))
+		return toolErr[searchMemoryOutput]("search_memory", fmt.Errorf("length must be > 0"))
 	}
 	pattern, err := parseHexBytes(in.PatternHex, "pattern_hex")
 	if err != nil {
-		return toolErr[searchMemoryOutput](err)
+		return toolErr[searchMemoryOutput]("search_memory", err)
 	}
 	gran := in.Granularity
 	if gran == 0 {
@@ -1098,37 +1112,37 @@ func (s *srv) searchMemory(ctx context.Context, _ *mcp.CallToolRequest, in searc
 		if errors.Is(err, gokd.ErrNotFound) {
 			return nil, searchMemoryOutput{Found: false, MatchHex: ""}, nil
 		}
-		return toolErr[searchMemoryOutput](err)
+		return toolErr[searchMemoryOutput]("search_memory", err)
 	}
 	return nil, searchMemoryOutput{Found: true, MatchHex: hex64(match)}, nil
 }
 
 func (s *srv) virtualToPhysical(ctx context.Context, _ *mcp.CallToolRequest, in virtualToPhysicalInput) (*mcp.CallToolResult, virtualToPhysicalOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[virtualToPhysicalOutput](err)
+		return toolErr[virtualToPhysicalOutput]("virtual_to_physical", err)
 	}
 	va, err := parseHexUint64(in.VAHex, "va_hex")
 	if err != nil {
-		return toolErr[virtualToPhysicalOutput](err)
+		return toolErr[virtualToPhysicalOutput]("virtual_to_physical", err)
 	}
 	pa, err := s.sess.VirtualToPhysical(va)
 	if err != nil {
-		return toolErr[virtualToPhysicalOutput](err)
+		return toolErr[virtualToPhysicalOutput]("virtual_to_physical", err)
 	}
 	return nil, virtualToPhysicalOutput{PAHex: hex64(pa)}, nil
 }
 
 func (s *srv) queryRegion(ctx context.Context, _ *mcp.CallToolRequest, in queryRegionInput) (*mcp.CallToolResult, queryRegionOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[queryRegionOutput](err)
+		return toolErr[queryRegionOutput]("query_region", err)
 	}
 	va, err := parseHexUint64(in.VAHex, "va_hex")
 	if err != nil {
-		return toolErr[queryRegionOutput](err)
+		return toolErr[queryRegionOutput]("query_region", err)
 	}
 	r, err := s.sess.QueryRegion(va)
 	if err != nil {
-		return toolErr[queryRegionOutput](err)
+		return toolErr[queryRegionOutput]("query_region", err)
 	}
 	return nil, queryRegionOutput{
 		BaseAddressHex:       hex64(r.BaseAddress),
@@ -1143,7 +1157,7 @@ func (s *srv) queryRegion(ctx context.Context, _ *mcp.CallToolRequest, in queryR
 
 func (s *srv) writeDump(ctx context.Context, _ *mcp.CallToolRequest, in writeDumpInput) (*mcp.CallToolResult, okOutput, error) {
 	if strings.TrimSpace(in.Path) == "" {
-		return toolErr[okOutput](fmt.Errorf("path is required"))
+		return toolErr[okOutput]("write_dump", fmt.Errorf("path is required"))
 	}
 	var kind gokd.DumpKind
 	switch strings.ToLower(strings.TrimSpace(in.Kind)) {
@@ -1154,7 +1168,7 @@ func (s *srv) writeDump(ctx context.Context, _ *mcp.CallToolRequest, in writeDum
 	case "full":
 		kind = gokd.DumpFull
 	default:
-		return toolErr[okOutput](fmt.Errorf("invalid kind: %q (want 'small', 'default', or 'full')", in.Kind))
+		return toolErr[okOutput]("write_dump", fmt.Errorf("invalid kind: %q (want 'small', 'default', or 'full')", in.Kind))
 	}
 	timeout := in.TimeoutSeconds
 	if timeout == 0 {
@@ -1162,7 +1176,7 @@ func (s *srv) writeDump(ctx context.Context, _ *mcp.CallToolRequest, in writeDum
 	}
 	ctx, cancel, err := contextWithSeconds(ctx, timeout)
 	if err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("write_dump", err)
 	}
 	defer cancel()
 	if err := s.sess.WriteDump(ctx, in.Path, gokd.WriteDumpOptions{
@@ -1170,7 +1184,7 @@ func (s *srv) writeDump(ctx context.Context, _ *mcp.CallToolRequest, in writeDum
 		Flags:   gokd.DumpFormatFlags(in.Flags),
 		Comment: in.Comment,
 	}); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("write_dump", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
@@ -1179,29 +1193,29 @@ func (s *srv) writeDump(ctx context.Context, _ *mcp.CallToolRequest, in writeDum
 
 func (s *srv) addDataBreakpoint(ctx context.Context, _ *mcp.CallToolRequest, in addDataBreakpointInput) (*mcp.CallToolResult, addBreakpointOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[addBreakpointOutput](err)
+		return toolErr[addBreakpointOutput]("add_data_breakpoint", err)
 	}
 	addr, err := parseHexUint64(in.AddressHex, "address_hex")
 	if err != nil {
-		return toolErr[addBreakpointOutput](err)
+		return toolErr[addBreakpointOutput]("add_data_breakpoint", err)
 	}
 	if len(in.Access) == 0 {
-		return toolErr[addBreakpointOutput](fmt.Errorf("access must contain at least one of 'read', 'write', 'execute', 'io'"))
+		return toolErr[addBreakpointOutput]("add_data_breakpoint", fmt.Errorf("access must contain at least one of 'read', 'write', 'execute', 'io'"))
 	}
 	mask, err := parseBreakpointAccess(in.Access)
 	if err != nil {
-		return toolErr[addBreakpointOutput](err)
+		return toolErr[addBreakpointOutput]("add_data_breakpoint", err)
 	}
 	bp, err := s.sess.AddDataBreakpoint(addr, in.Size, mask)
 	if err != nil {
-		return toolErr[addBreakpointOutput](err)
+		return toolErr[addBreakpointOutput]("add_data_breakpoint", err)
 	}
 	return nil, addBreakpointOutput{ID: bp.ID, AddressHex: hex64(bp.Address)}, nil
 }
 
 func (s *srv) configureBreakpoint(ctx context.Context, _ *mcp.CallToolRequest, in configureBreakpointInput) (*mcp.CallToolResult, okOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("configure_breakpoint", err)
 	}
 	opts := gokd.BreakpointOptions{
 		PassCount:     in.PassCount,
@@ -1218,18 +1232,18 @@ func (s *srv) configureBreakpoint(ctx context.Context, _ *mcp.CallToolRequest, i
 		}
 	}
 	if err := s.sess.ConfigureBreakpoint(in.ID, opts); err != nil {
-		return toolErr[okOutput](err)
+		return toolErr[okOutput]("configure_breakpoint", err)
 	}
 	return nil, okOutput{OK: true}, nil
 }
 
 func (s *srv) breakpointCommand(ctx context.Context, _ *mcp.CallToolRequest, in breakpointCommandInput) (*mcp.CallToolResult, breakpointCommandOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[breakpointCommandOutput](err)
+		return toolErr[breakpointCommandOutput]("breakpoint_command", err)
 	}
 	cmd, err := s.sess.BreakpointCommand(in.ID)
 	if err != nil {
-		return toolErr[breakpointCommandOutput](err)
+		return toolErr[breakpointCommandOutput]("breakpoint_command", err)
 	}
 	return nil, breakpointCommandOutput{Command: cmd}, nil
 }
@@ -1238,14 +1252,14 @@ func (s *srv) breakpointCommand(ctx context.Context, _ *mcp.CallToolRequest, in 
 
 func (s *srv) lastException(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, lastExceptionOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[lastExceptionOutput](err)
+		return toolErr[lastExceptionOutput]("last_exception", err)
 	}
 	ex, err := s.sess.LastException()
 	if err != nil {
 		if errors.Is(err, gokd.ErrNotFound) {
 			return nil, lastExceptionOutput{Found: false}, nil
 		}
-		return toolErr[lastExceptionOutput](err)
+		return toolErr[lastExceptionOutput]("last_exception", err)
 	}
 	params := make([]string, 0, ex.ParameterCount)
 	for i := uint32(0); i < ex.ParameterCount; i++ {
@@ -1269,14 +1283,14 @@ func (s *srv) lastException(ctx context.Context, _ *mcp.CallToolRequest, _ struc
 
 func (s *srv) bugCheck(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, bugCheckOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[bugCheckOutput](err)
+		return toolErr[bugCheckOutput]("bug_check", err)
 	}
 	bc, err := s.sess.BugCheck()
 	if err != nil {
 		if errors.Is(err, gokd.ErrNotFound) {
 			return nil, bugCheckOutput{Found: false}, nil
 		}
-		return toolErr[bugCheckOutput](err)
+		return toolErr[bugCheckOutput]("bug_check", err)
 	}
 	args := make([]string, 0, len(bc.Args))
 	for _, a := range bc.Args {
@@ -1296,21 +1310,21 @@ func (s *srv) bugCheck(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) 
 
 func (s *srv) dumpType(ctx context.Context, _ *mcp.CallToolRequest, in dumpTypeInput) (*mcp.CallToolResult, typeValueOutput, error) {
 	if err := checkContext(ctx); err != nil {
-		return toolErr[typeValueOutput](err)
+		return toolErr[typeValueOutput]("dump_type", err)
 	}
 	if strings.TrimSpace(in.Module) == "" {
-		return toolErr[typeValueOutput](fmt.Errorf("module is required"))
+		return toolErr[typeValueOutput]("dump_type", fmt.Errorf("module is required"))
 	}
 	if strings.TrimSpace(in.Type) == "" {
-		return toolErr[typeValueOutput](fmt.Errorf("type is required"))
+		return toolErr[typeValueOutput]("dump_type", fmt.Errorf("type is required"))
 	}
 	addr, err := parseHexUint64(in.AddressHex, "address_hex")
 	if err != nil {
-		return toolErr[typeValueOutput](err)
+		return toolErr[typeValueOutput]("dump_type", err)
 	}
 	ctx2, cancel, err := contextWithSeconds(ctx, in.TimeoutSeconds)
 	if err != nil {
-		return toolErr[typeValueOutput](err)
+		return toolErr[typeValueOutput]("dump_type", err)
 	}
 	defer cancel()
 	tv, err := s.sess.DumpType(ctx2, in.Module, in.Type, addr, gokd.DumpTypeOptions{
@@ -1318,7 +1332,7 @@ func (s *srv) dumpType(ctx context.Context, _ *mcp.CallToolRequest, in dumpTypeI
 		FollowPtrs: in.FollowPtrs,
 	})
 	if err != nil {
-		return toolErr[typeValueOutput](err)
+		return toolErr[typeValueOutput]("dump_type", err)
 	}
 	return nil, *formatTypeValue(tv), nil
 }
