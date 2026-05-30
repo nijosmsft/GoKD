@@ -19,11 +19,17 @@ package dbgcgo
 import "C"
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 )
+
+// ErrSessionClosed is returned when an operation is attempted on a
+// Session whose Close has already completed (or is in progress).
+var ErrSessionClosed = errors.New("gokd: session is closed")
 
 // Session wraps a gokd_session_t handle and the dispatch goroutine.
 type Session struct {
@@ -31,6 +37,7 @@ type Session struct {
 	cmdCh  chan command
 	done   chan struct{}
 	once   sync.Once
+	closed atomic.Bool
 }
 
 type command struct {
@@ -77,18 +84,44 @@ func NewSession() (*Session, error) {
 }
 
 // Close shuts down the dispatch goroutine and destroys the session.
+// Safe to call multiple times; subsequent calls are no-ops.
 func (s *Session) Close() {
 	s.once.Do(func() {
+		// Mark closed BEFORE closing cmdCh so any concurrent exec
+		// observes the flag and returns ErrSessionClosed instead of
+		// panicking on a send to a closed channel.
+		s.closed.Store(true)
 		close(s.cmdCh)
 		<-s.done
 	})
 }
 
+// IsClosed reports whether Close has been called.
+func (s *Session) IsClosed() bool { return s.closed.Load() }
+
 // exec runs fn on the dispatch thread and blocks until it completes.
-func (s *Session) exec(fn func()) {
+// Returns ErrSessionClosed if the session has been closed.
+// Recovers from the rare race where the session is closed between the
+// closed-check and the send on cmdCh.
+func (s *Session) exec(fn func()) error {
+	if s.closed.Load() {
+		return ErrSessionClosed
+	}
 	cmd := command{fn: fn, result: make(chan struct{})}
-	s.cmdCh <- cmd
+	sent := func() (ok bool) {
+		defer func() {
+			if recover() != nil {
+				ok = false
+			}
+		}()
+		s.cmdCh <- cmd
+		return true
+	}()
+	if !sent {
+		return ErrSessionClosed
+	}
 	<-cmd.result
+	return nil
 }
 
 // hresult converts a C int32_t HRESULT to a Go error (nil if S_OK).

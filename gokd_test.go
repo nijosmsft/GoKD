@@ -2,6 +2,7 @@ package gokd_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"testing"
@@ -89,6 +90,27 @@ func TestModules(t *testing.T) {
 	}
 	if !foundNtdll {
 		t.Error("expected to find ntdll module")
+	}
+}
+
+func TestSessionDoubleClose(t *testing.T) {
+	sess, err := gokd.New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	if err := sess.Close(); err != nil {
+		t.Fatalf("first Close() returned: %v", err)
+	}
+	// Second Close should be idempotent and never panic.
+	if err := sess.Close(); err != nil {
+		t.Fatalf("second Close() returned: %v", err)
+	}
+
+	// Subsequent operations on the closed session should report
+	// ErrSessionClosed rather than panicking or returning success.
+	if _, err := sess.Modules(); !errors.Is(err, gokd.ErrSessionClosed) {
+		t.Fatalf("Modules() after Close: want ErrSessionClosed, got %v", err)
 	}
 }
 

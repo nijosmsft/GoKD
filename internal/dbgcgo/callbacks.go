@@ -116,11 +116,15 @@ func (s *Session) RegisterCallbacks(eventBuf, outputBuf int) (<-chan Event, <-ch
 }
 
 // UnregisterCallbacks removes the channels and clears the C callbacks.
+// Safe to call after Close: in that case the exec is a no-op and only
+// the channel cleanup runs (which is itself idempotent).
 func (s *Session) UnregisterCallbacks() {
-	s.exec(func() {
-		C.gokd_set_event_callback(s.handle, nil, nil)
-		C.gokd_set_output_callback(s.handle, nil, nil)
-	})
+	if !s.IsClosed() {
+		_ = s.exec(func() {
+			C.gokd_set_event_callback(s.handle, nil, nil)
+			C.gokd_set_output_callback(s.handle, nil, nil)
+		})
+	}
 
 	cbMu.Lock()
 	if ch, ok := eventChans[s.handle]; ok {

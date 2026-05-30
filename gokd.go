@@ -23,9 +23,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/nijosmsft/gokd/internal/dbgcgo"
 )
+
+// ErrSessionClosed is returned by methods invoked on a Session after
+// Close has been called. Re-exported from the internal dbgcgo package.
+var ErrSessionClosed = dbgcgo.ErrSessionClosed
 
 // Session is the top-level handle to a debug session.
 // All methods are safe to call from any goroutine.
@@ -373,9 +378,10 @@ func (ModuleUnloadedEvent) isEvent() {}
 // ── session implementation ────────────────────────────────────────────
 
 type session struct {
-	inner    *dbgcgo.Session
-	eventCh  <-chan dbgcgo.Event
-	outputCh <-chan string
+	inner     *dbgcgo.Session
+	eventCh   <-chan dbgcgo.Event
+	outputCh  <-chan string
+	closeOnce sync.Once
 }
 
 func (s *session) AttachProcess(pid uint32, opts AttachOptions) error {
@@ -558,6 +564,9 @@ func (s *session) SetThread(sysTID uint32) error {
 }
 
 func (s *session) Modules() ([]*Module, error) {
+	if s.inner.IsClosed() {
+		return nil, ErrSessionClosed
+	}
 	mods, err := s.inner.GetModules()
 	if err != nil {
 		return nil, err
@@ -752,7 +761,9 @@ func (s *session) Execute(cmd string) (string, error) {
 }
 
 func (s *session) Close() error {
-	s.inner.UnregisterCallbacks()
-	s.inner.Close()
+	s.closeOnce.Do(func() {
+		s.inner.UnregisterCallbacks()
+		s.inner.Close()
+	})
 	return nil
 }
