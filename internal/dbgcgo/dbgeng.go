@@ -790,6 +790,98 @@ func (s *Session) Disassemble(addr uint64) (string, uint64, error) {
 	return text, uint64(nextAddr), hresult(hr)
 }
 
+// ── Expression evaluation (t1-1) ──────────────────────────────────────
+
+// ValueKind mirrors DEBUG_VALUE_* in dbgeng.h.
+type ValueKind uint32
+
+const (
+	ValueInvalid   ValueKind = 0
+	ValueInt8      ValueKind = 1
+	ValueInt16     ValueKind = 2
+	ValueInt32     ValueKind = 3
+	ValueInt64     ValueKind = 4
+	ValueFloat32   ValueKind = 5
+	ValueFloat64   ValueKind = 6
+	ValueFloat80   ValueKind = 7
+	ValueFloat82   ValueKind = 8
+	ValueFloat128  ValueKind = 9
+	ValueVector64  ValueKind = 10
+	ValueVector128 ValueKind = 11
+)
+
+// Value mirrors gokd_value_t. Type indicates which payload slot is
+// authoritative; Raw always carries the full 24-byte DEBUG_VALUE union
+// for callers that need float-80/82/128 or vector-64/128 fidelity.
+type Value struct {
+	Type ValueKind
+	U64  uint64
+	F64  float64
+	Raw  [24]byte
+}
+
+// Evaluate parses an expression in the current syntax and returns the
+// computed value. desired may be ValueInvalid for the engine's "natural"
+// type. The second return is the byte index into expr where the parser
+// stopped (0 means the whole expression was consumed).
+func (s *Session) Evaluate(expr string, desired ValueKind) (Value, uint32, error) {
+	var v Value
+	var rem C.uint32_t
+	var hr C.int32_t
+	s.exec(func() {
+		cexpr := C.CString(expr)
+		defer C.free(unsafe.Pointer(cexpr))
+		var cv C.gokd_value_t
+		hr = C.gokd_evaluate(s.handle, cexpr, C.uint32_t(desired), &cv, &rem)
+		if hr == 0 {
+			v.Type = ValueKind(cv._type)
+			v.U64 = uint64(cv.u64)
+			v.F64 = float64(cv.f64)
+			for i := 0; i < 24; i++ {
+				v.Raw[i] = byte(cv.raw[i])
+			}
+		}
+	})
+	return v, uint32(rem), hresult(hr)
+}
+
+// Radix returns the current numeric radix (10 or 16 typically).
+func (s *Session) Radix() (uint32, error) {
+	var r C.uint32_t
+	var hr C.int32_t
+	s.exec(func() { hr = C.gokd_get_radix(s.handle, &r) })
+	return uint32(r), hresult(hr)
+}
+
+// SetRadix sets the numeric radix used by Evaluate and DbgEng's
+// formatting helpers.
+func (s *Session) SetRadix(radix uint32) error {
+	var hr C.int32_t
+	s.exec(func() { hr = C.gokd_set_radix(s.handle, C.uint32_t(radix)) })
+	return hresult(hr)
+}
+
+// ExpressionSyntax returns the current expression-syntax index
+// (DEBUG_EXPR_MASM = 0, DEBUG_EXPR_CPLUSPLUS = 1).
+func (s *Session) ExpressionSyntax() (uint32, error) {
+	var idx C.uint32_t
+	var hr C.int32_t
+	s.exec(func() { hr = C.gokd_get_expression_syntax(s.handle, &idx) })
+	return uint32(idx), hresult(hr)
+}
+
+// SetExpressionSyntax switches the expression syntax by name.
+// name must be "MASM" or "C++".
+func (s *Session) SetExpressionSyntax(name string) error {
+	var hr C.int32_t
+	s.exec(func() {
+		cname := C.CString(name)
+		defer C.free(unsafe.Pointer(cname))
+		hr = C.gokd_set_expression_syntax(s.handle, cname)
+	})
+	return hresult(hr)
+}
+
 // ── Escape hatch ──────────────────────────────────────────────────────
 
 func (s *Session) Execute(cmd string) (string, error) {

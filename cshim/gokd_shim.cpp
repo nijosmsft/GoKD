@@ -1272,6 +1272,91 @@ extern "C" int32_t gokd_disassemble(gokd_session_t handle, uint64_t addr,
 }
 
 /* ====================================================================== */
+/*  Expression evaluation (t1-1)                                          */
+/* ====================================================================== */
+
+extern "C" int32_t gokd_evaluate(gokd_session_t handle,
+                                  const char *expr_utf8,
+                                  uint32_t desired_type,
+                                  gokd_value_t *out_value,
+                                  uint32_t *out_remainder) {
+    S;
+    if (!out_value || !expr_utf8) return E_INVALIDARG;
+
+    wchar_t *wexpr = utf8_to_wide(expr_utf8);
+    if (!wexpr) return E_OUTOFMEMORY;
+    size_t wexpr_len = wcslen(wexpr);
+
+    DEBUG_VALUE dv = {};
+    ULONG rem = 0;
+    HRESULT hr = s->control->EvaluateWide(wexpr, desired_type, &dv, &rem);
+    free(wexpr);
+
+    if (SUCCEEDED(hr)) {
+        memset(out_value, 0, sizeof(*out_value));
+        out_value->type = dv.Type;
+        out_value->u64 = dv.I64;
+        if (dv.Type == DEBUG_VALUE_FLOAT32) {
+            out_value->f64 = (double)dv.F32;
+        } else if (dv.Type == DEBUG_VALUE_FLOAT64) {
+            out_value->f64 = dv.F64;
+        }
+        /* RawBytes is the full 24-byte payload union — copies float-80/82/128
+         * and vector-64/128 cases that don't fit u64/f64. */
+        memcpy(out_value->raw, dv.RawBytes, sizeof(out_value->raw));
+        if (out_remainder) {
+            /* DbgEng returns the wide-char index at which parsing stopped;
+             * convert to an unconsumed-character count so 0 == fully parsed. */
+            uint32_t unconsumed = (rem >= wexpr_len) ? 0u
+                                                     : (uint32_t)(wexpr_len - rem);
+            *out_remainder = unconsumed;
+        }
+    }
+    SET_LAST_ERROR(hr);
+    return hr;
+}
+
+extern "C" int32_t gokd_get_radix(gokd_session_t handle, uint32_t *out_radix) {
+    S;
+    if (!out_radix) return E_INVALIDARG;
+    ULONG r = 0;
+    HRESULT hr = s->control->GetRadix(&r);
+    if (SUCCEEDED(hr)) *out_radix = r;
+    SET_LAST_ERROR(hr);
+    return hr;
+}
+
+extern "C" int32_t gokd_set_radix(gokd_session_t handle, uint32_t radix) {
+    S;
+    HRESULT hr = s->control->SetRadix(radix);
+    SET_LAST_ERROR(hr);
+    return hr;
+}
+
+extern "C" int32_t gokd_get_expression_syntax(gokd_session_t handle,
+                                               uint32_t *out_index) {
+    S;
+    if (!out_index) return E_INVALIDARG;
+    ULONG idx = 0;
+    HRESULT hr = s->control->GetExpressionSyntax(&idx);
+    if (SUCCEEDED(hr)) *out_index = idx;
+    SET_LAST_ERROR(hr);
+    return hr;
+}
+
+extern "C" int32_t gokd_set_expression_syntax(gokd_session_t handle,
+                                               const char *name_utf8) {
+    S;
+    if (!name_utf8) return E_INVALIDARG;
+    wchar_t *wname = utf8_to_wide(name_utf8);
+    if (!wname) return E_OUTOFMEMORY;
+    HRESULT hr = s->control->SetExpressionSyntaxByNameWide(wname);
+    free(wname);
+    SET_LAST_ERROR(hr);
+    return hr;
+}
+
+/* ====================================================================== */
 /*  Callbacks                                                             */
 /* ====================================================================== */
 

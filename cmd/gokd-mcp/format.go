@@ -167,3 +167,10 @@ func formatStopEvent(ev *gokd.StopEvent) StopEvent {
 	}
 	return out
 }
+
+// formatValue picks the right payload slot for a Value and returns a
+// (type-name, u64, f64, raw-hex) tuple. raw is always returned as a hex
+// string for full fidelity, even when u64/f64 carries the canonical value.
+func formatValue(v gokd.Value) (string, uint64, float64, string) {
+	return gokd.ValueKindString(v.Type), v.U64, v.F64, hex.EncodeToString(v.Raw[:])
+}

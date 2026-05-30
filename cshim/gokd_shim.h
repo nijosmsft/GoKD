@@ -115,6 +115,41 @@ typedef struct {
 } gokd_field_t;
 
 /* ====================================================================== */
+/*  Expression evaluation (t1-1)                                          */
+/* ====================================================================== */
+
+/* Value kinds mirror DEBUG_VALUE_* in dbgeng.h. */
+#define GOKD_VALUE_INVALID   0
+#define GOKD_VALUE_INT8      1
+#define GOKD_VALUE_INT16     2
+#define GOKD_VALUE_INT32     3
+#define GOKD_VALUE_INT64     4
+#define GOKD_VALUE_FLOAT32   5
+#define GOKD_VALUE_FLOAT64   6
+#define GOKD_VALUE_FLOAT80   7
+#define GOKD_VALUE_FLOAT82   8
+#define GOKD_VALUE_FLOAT128  9
+#define GOKD_VALUE_VECTOR64  10
+#define GOKD_VALUE_VECTOR128 11
+
+#define GOKD_EXPR_MASM 0
+#define GOKD_EXPR_CPP  1
+
+/*
+ * Evaluated expression value. type carries one of GOKD_VALUE_*; u64 is the
+ * zero-extended integer slot for INT8/16/32/64; f64 carries the FLOAT32/64
+ * value; raw[24] holds the full DEBUG_VALUE tail for callers that need the
+ * float-80/82/128 or vector-64/128 payload (little-endian, padded to 24
+ * bytes per dbgeng.h).
+ */
+typedef struct gokd_value_s {
+    uint32_t type;
+    uint64_t u64;
+    double   f64;
+    uint8_t  raw[24];
+} gokd_value_t;
+
+/* ====================================================================== */
 /*  Event types                                                           */
 /* ====================================================================== */
 
@@ -450,6 +485,32 @@ int32_t gokd_list_breakpoints(gokd_session_t s,
 
 int32_t gokd_disassemble(gokd_session_t s, uint64_t addr,
                           char *out, size_t len, uint64_t *next_addr);
+
+/* ====================================================================== */
+/*  Expression evaluation (t1-1)                                          */
+/* ====================================================================== */
+
+/*
+ * Evaluate a MASM/C++ expression. desired_type may be GOKD_VALUE_INVALID
+ * for "natural" type, otherwise one of GOKD_VALUE_*. out_value is required
+ * and is fully populated on success. out_remainder, when non-NULL, receives
+ * the number of wide characters that remain unconsumed after the parsed
+ * expression (0 means the whole expression was consumed).
+ */
+int32_t gokd_evaluate(gokd_session_t s,
+                       const char *expr_utf8,
+                       uint32_t desired_type,
+                       gokd_value_t *out_value,
+                       uint32_t *out_remainder);
+
+int32_t gokd_get_radix(gokd_session_t s, uint32_t *out_radix);
+int32_t gokd_set_radix(gokd_session_t s, uint32_t radix);
+
+/* Returns DEBUG_EXPR_* in *out_index. */
+int32_t gokd_get_expression_syntax(gokd_session_t s, uint32_t *out_index);
+
+/* name is "MASM" or "C++"; mirrors SetExpressionSyntaxByNameWide. */
+int32_t gokd_set_expression_syntax(gokd_session_t s, const char *name_utf8);
 
 /* ====================================================================== */
 /*  Callbacks                                                             */

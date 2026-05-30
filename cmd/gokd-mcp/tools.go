@@ -189,6 +189,38 @@ type symFixInput struct {
 	Cache string `json:"cache,omitempty" jsonschema:"optional local cache directory; empty uses a per-user default"`
 }
 
+// --- t1-1 evaluate ---
+
+type evaluateInput struct {
+	Expr           string `json:"expr" jsonschema:"expression to evaluate in the current syntax (MASM by default)"`
+	DesiredType    string `json:"desired_type,omitempty" jsonschema:"requested value kind (invalid|int8|int16|int32|int64|float32|float64|float80|float82|float128|vector64|vector128); empty/invalid means 'natural'"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty" jsonschema:"timeout in seconds; 0 means no timeout"`
+}
+
+type evaluateOutput struct {
+	Type      string  `json:"type"`
+	U64       uint64  `json:"u64"`
+	F64       float64 `json:"f64"`
+	RawHex    string  `json:"raw_hex"`
+	Remainder uint32  `json:"remainder"`
+}
+
+type radixOutput struct {
+	Radix uint32 `json:"radix"`
+}
+
+type setRadixInput struct {
+	Radix uint32 `json:"radix" jsonschema:"new radix (typically 10 or 16)"`
+}
+
+type expressionSyntaxOutput struct {
+	Syntax string `json:"syntax"`
+}
+
+type setExpressionSyntaxInput struct {
+	Syntax string `json:"syntax" jsonschema:"expression syntax to switch to (masm|cpp)"`
+}
+
 func toolErr[Out any](err error) (*mcp.CallToolResult, Out, error) {
 	var zero Out
 	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, zero, nil
@@ -252,6 +284,13 @@ func registerTools(server *mcp.Server, s *srv) {
 	// --- t1-4 symbol reload / status ---
 	mcp.AddTool(server, &mcp.Tool{Name: "reload_symbols", Description: "Force a symbol reload via IDebugSymbols3::ReloadWide. Use when get_modules reports a deferred symbol_type or after changing set_symbol_path. spec is forwarded verbatim ('', '/f', '/f <module>'). May download from the symbol server — supply timeout_seconds (default 0 = no timeout) to bound the wait. Returns ok=true on success."}, s.reloadSymbols)
 	mcp.AddTool(server, &mcp.Tool{Name: "sym_fix", Description: "Configure the symbol path to the standard Microsoft public-symbol-server cache layout (mirrors WinDbg .symfix). Pass an optional cache directory; empty uses a per-user default. Returns ok=true. Follow with reload_symbols to actually pull PDBs."}, s.symFix)
+
+	// --- t1-1 evaluate ---
+	mcp.AddTool(server, &mcp.Tool{Name: "evaluate", Description: "Evaluate a MASM or C++ expression via IDebugControl4::EvaluateWide. Use when you need a typed value from a symbol/arithmetic expression like 'nt!KiSystemServiceStart+0x40' or 'sizeof(_EPROCESS)'. Default syntax is MASM; switch with set_expression_syntax for C++ scope-resolution. May stall on PDB downloads — supply timeout_seconds. Returns type (string), u64 (integer slot), f64 (float slot), raw_hex (24-byte DEBUG_VALUE tail), and remainder (byte index where parsing stopped)."}, s.evaluate)
+	mcp.AddTool(server, &mcp.Tool{Name: "get_radix", Description: "Return the current numeric radix used by evaluate and DbgEng formatting (typically 10 or 16)."}, s.getRadix)
+	mcp.AddTool(server, &mcp.Tool{Name: "set_radix", Description: "Set the numeric radix used by evaluate and DbgEng formatting. Typical values: 10, 16."}, s.setRadix)
+	mcp.AddTool(server, &mcp.Tool{Name: "get_expression_syntax", Description: "Return the current expression-parser syntax ('masm' or 'cpp')."}, s.getExpressionSyntax)
+	mcp.AddTool(server, &mcp.Tool{Name: "set_expression_syntax", Description: "Switch the expression-parser syntax. Accepts 'masm' or 'cpp'. C++ is needed for scope-resolved names like MyClass::Method."}, s.setExpressionSyntax)
 }
 
 func (s *srv) attachProcess(ctx context.Context, _ *mcp.CallToolRequest, in attachProcessInput) (*mcp.CallToolResult, okOutput, error) {
@@ -726,6 +765,84 @@ func (s *srv) symFix(ctx context.Context, _ *mcp.CallToolRequest, in symFixInput
 		return toolErr[okOutput](err)
 	}
 	if err := s.sess.SymFix(in.Cache); err != nil {
+		return toolErr[okOutput](err)
+	}
+	return nil, okOutput{OK: true}, nil
+}
+
+// --- t1-1 evaluate ---
+
+func (s *srv) evaluate(ctx context.Context, _ *mcp.CallToolRequest, in evaluateInput) (*mcp.CallToolResult, evaluateOutput, error) {
+	if strings.TrimSpace(in.Expr) == "" {
+		return toolErr[evaluateOutput](fmt.Errorf("expr is required"))
+	}
+	kind, ok := gokd.ParseValueKind(in.DesiredType)
+	if !ok {
+		return toolErr[evaluateOutput](fmt.Errorf("invalid desired_type: %q", in.DesiredType))
+	}
+	ctx, cancel, err := contextWithSeconds(ctx, in.TimeoutSeconds)
+	if err != nil {
+		return toolErr[evaluateOutput](err)
+	}
+	defer cancel()
+	v, rem, err := s.sess.Evaluate(ctx, in.Expr, kind)
+	if err != nil {
+		return toolErr[evaluateOutput](err)
+	}
+	tname, u64, f64, rawHex := formatValue(v)
+	return nil, evaluateOutput{Type: tname, U64: u64, F64: f64, RawHex: rawHex, Remainder: rem}, nil
+}
+
+func (s *srv) getRadix(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, radixOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[radixOutput](err)
+	}
+	r, err := s.sess.Radix()
+	if err != nil {
+		return toolErr[radixOutput](err)
+	}
+	return nil, radixOutput{Radix: r}, nil
+}
+
+func (s *srv) setRadix(ctx context.Context, _ *mcp.CallToolRequest, in setRadixInput) (*mcp.CallToolResult, okOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[okOutput](err)
+	}
+	if err := s.sess.SetRadix(in.Radix); err != nil {
+		return toolErr[okOutput](err)
+	}
+	return nil, okOutput{OK: true}, nil
+}
+
+func (s *srv) getExpressionSyntax(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, expressionSyntaxOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[expressionSyntaxOutput](err)
+	}
+	syn, err := s.sess.ExpressionSyntax()
+	if err != nil {
+		return toolErr[expressionSyntaxOutput](err)
+	}
+	name := "masm"
+	if syn == gokd.ExpressionSyntaxCPP {
+		name = "cpp"
+	}
+	return nil, expressionSyntaxOutput{Syntax: name}, nil
+}
+
+func (s *srv) setExpressionSyntax(ctx context.Context, _ *mcp.CallToolRequest, in setExpressionSyntaxInput) (*mcp.CallToolResult, okOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[okOutput](err)
+	}
+	var syn gokd.ExpressionSyntax
+	switch strings.ToLower(strings.TrimSpace(in.Syntax)) {
+	case "masm", "":
+		syn = gokd.ExpressionSyntaxMASM
+	case "cpp", "c++":
+		syn = gokd.ExpressionSyntaxCPP
+	default:
+		return toolErr[okOutput](fmt.Errorf("invalid syntax: %q (want 'masm' or 'cpp')", in.Syntax))
+	}
+	if err := s.sess.SetExpressionSyntax(syn); err != nil {
 		return toolErr[okOutput](err)
 	}
 	return nil, okOutput{OK: true}, nil

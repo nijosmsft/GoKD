@@ -111,6 +111,21 @@ type Session interface {
 	Disassemble(addr uint64) (*Instruction, error)
 	DisassembleRange(addr uint64, count int) ([]*Instruction, error)
 
+	// Evaluate parses an expression in the current expression syntax
+	// (MASM by default) and returns the typed result. desired may be
+	// ValueInvalid to ask for the engine's natural type. The remainder
+	// is the byte index into expr where the parser stopped; 0 means the
+	// whole expression was consumed. Symbol resolution may stall on
+	// PDB downloads — use ctx to bound the wait.
+	//
+	// Expressions like MyClass::Method require ExpressionSyntaxCPP;
+	// the default MASM parser will reject them with E_INVALIDARG.
+	Evaluate(ctx context.Context, expr string, desired ValueKind) (Value, uint32, error)
+	Radix() (uint32, error)
+	SetRadix(r uint32) error
+	ExpressionSyntax() (ExpressionSyntax, error)
+	SetExpressionSyntax(syn ExpressionSyntax) error
+
 	// Async streams
 	Events() <-chan Event
 	Output() <-chan string
@@ -402,6 +417,112 @@ type Instruction struct {
 	Text    string
 	Size    uint32
 	Bytes   []byte
+}
+
+// ── Expression evaluation (t1-1) ──────────────────────────────────────
+
+// ValueKind mirrors dbgcgo.ValueKind / DEBUG_VALUE_* in dbgeng.h.
+type ValueKind = dbgcgo.ValueKind
+
+const (
+	ValueInvalid   = dbgcgo.ValueInvalid
+	ValueInt8      = dbgcgo.ValueInt8
+	ValueInt16     = dbgcgo.ValueInt16
+	ValueInt32     = dbgcgo.ValueInt32
+	ValueInt64     = dbgcgo.ValueInt64
+	ValueFloat32   = dbgcgo.ValueFloat32
+	ValueFloat64   = dbgcgo.ValueFloat64
+	ValueFloat80   = dbgcgo.ValueFloat80
+	ValueFloat82   = dbgcgo.ValueFloat82
+	ValueFloat128  = dbgcgo.ValueFloat128
+	ValueVector64  = dbgcgo.ValueVector64
+	ValueVector128 = dbgcgo.ValueVector128
+)
+
+// ValueKindString returns a stable lower-case name for v.
+func ValueKindString(v ValueKind) string {
+	switch v {
+	case ValueInvalid:
+		return "invalid"
+	case ValueInt8:
+		return "int8"
+	case ValueInt16:
+		return "int16"
+	case ValueInt32:
+		return "int32"
+	case ValueInt64:
+		return "int64"
+	case ValueFloat32:
+		return "float32"
+	case ValueFloat64:
+		return "float64"
+	case ValueFloat80:
+		return "float80"
+	case ValueFloat82:
+		return "float82"
+	case ValueFloat128:
+		return "float128"
+	case ValueVector64:
+		return "vector64"
+	case ValueVector128:
+		return "vector128"
+	default:
+		return fmt.Sprintf("unknown(%d)", uint32(v))
+	}
+}
+
+// ParseValueKind is the inverse of ValueKindString. Returns ValueInvalid
+// and false for unknown names. Case-insensitive.
+func ParseValueKind(name string) (ValueKind, bool) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "invalid":
+		return ValueInvalid, true
+	case "int8":
+		return ValueInt8, true
+	case "int16":
+		return ValueInt16, true
+	case "int32":
+		return ValueInt32, true
+	case "int64":
+		return ValueInt64, true
+	case "float32":
+		return ValueFloat32, true
+	case "float64":
+		return ValueFloat64, true
+	case "float80":
+		return ValueFloat80, true
+	case "float82":
+		return ValueFloat82, true
+	case "float128":
+		return ValueFloat128, true
+	case "vector64":
+		return ValueVector64, true
+	case "vector128":
+		return ValueVector128, true
+	}
+	return ValueInvalid, false
+}
+
+// Value mirrors dbgcgo.Value. See [Session.Evaluate].
+type Value = dbgcgo.Value
+
+// ExpressionSyntax identifies the DbgEng expression parser to use.
+type ExpressionSyntax uint32
+
+const (
+	ExpressionSyntaxMASM ExpressionSyntax = 0
+	ExpressionSyntaxCPP  ExpressionSyntax = 1
+)
+
+func (e ExpressionSyntax) String() string {
+	switch e {
+	case ExpressionSyntaxMASM:
+		return "MASM"
+	case ExpressionSyntaxCPP:
+		return "C++"
+	default:
+		return fmt.Sprintf("ExpressionSyntax(%d)", uint32(e))
+	}
 }
 
 // Event types delivered on Session.Events().
@@ -848,6 +969,47 @@ func (s *session) DisassembleRange(addr uint64, count int) ([]*Instruction, erro
 		cur = next
 	}
 	return out, nil
+}
+
+// Evaluate implements [Session.Evaluate].
+func (s *session) Evaluate(ctx context.Context, expr string, desired ValueKind) (Value, uint32, error) {
+	var v Value
+	var rem uint32
+	err := s.runWithCancel(ctx, func() error {
+		var e error
+		v, rem, e = s.inner.Evaluate(expr, desired)
+		return e
+	})
+	return v, rem, err
+}
+
+func (s *session) Radix() (uint32, error) {
+	return s.inner.Radix()
+}
+
+func (s *session) SetRadix(r uint32) error {
+	return s.inner.SetRadix(r)
+}
+
+func (s *session) ExpressionSyntax() (ExpressionSyntax, error) {
+	idx, err := s.inner.ExpressionSyntax()
+	if err != nil {
+		return 0, err
+	}
+	return ExpressionSyntax(idx), nil
+}
+
+func (s *session) SetExpressionSyntax(syn ExpressionSyntax) error {
+	var name string
+	switch syn {
+	case ExpressionSyntaxMASM:
+		name = "MASM"
+	case ExpressionSyntaxCPP:
+		name = "C++"
+	default:
+		return fmt.Errorf("gokd: unknown ExpressionSyntax(%d)", uint32(syn))
+	}
+	return s.inner.SetExpressionSyntax(name)
 }
 
 func (s *session) Events() <-chan Event {
