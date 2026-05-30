@@ -178,21 +178,34 @@ unset WINDBG_SDK WINDOWS_SDK_INCLUDE
 go build -o bin/gokd-mcp.exe ./cmd/gokd-mcp
 ```
 
-Example MCP configuration for Claude Desktop or Copilot CLI:
+Example MCP configuration for Claude Desktop or Copilot CLI
+(`%USERPROFILE%\.copilot\mcp-config.json` on Windows):
 
 ```json
 {
   "mcpServers": {
     "gokd": {
       "command": "C:\\git\\gokd\\bin\\gokd-mcp.exe",
-      "args": ["-symbols", "srv*C:\\symbols*https://msdl.microsoft.com/download/symbols"]
+      "args": ["-log", "C:\\git\\gokd\\gokd-mcp.log"]
     }
   }
 }
 ```
 
+Pass `-symbols PATH` to override the default symbol path (Microsoft public symbols +
+per-user cache via `WithDefaultSymbols`).
+
 The server uses stdout for JSON-RPC only. Engine output and optional MCP logging go to
 stderr, or to the path passed with `-log`.
+
+A self-contained end-to-end test exists at `cmd/gokd-mcp/e2e_test.go` (under the
+`manual` build tag) that spawns the server, attaches to a real `notepad.exe`, and
+walks through `get_modules`, `get_threads`, `get_registers`, `get_stack`, and
+`detach`. Run with:
+
+```bash
+go test -tags manual -v -run TestMCPEndToEnd ./cmd/gokd-mcp/
+```
 
 ## Running tests
 
