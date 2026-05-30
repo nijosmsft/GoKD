@@ -1,0 +1,572 @@
+{
+  "tools": [
+    {
+      "name": "add_breakpoint",
+      "description": "Sets a code breakpoint at an address or symbol expression (e.g. 'nt!NtCreateFile'). Returns the assigned breakpoint ID. Use list_breakpoints to inspect, remove_breakpoint to delete.",
+      "input_schema_sha256": "sha256:23b6b32ef22852df1ef9548178dda94766bf06a991541557eb4e7254fd1983f2",
+      "output_schema_sha256": "sha256:34af1215937193003deda9d8865ff4a0c12a0ebd1324657003752f898a166a96",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "add_breakpoint_source_line",
+      "description": "Resolves a source file and line to an address and installs a code breakpoint there. Requires line-info PDBs for the target binary; otherwise fails with E_NOTFOUND. Returns the assigned breakpoint ID.",
+      "input_schema_sha256": "sha256:c2a034e72c988913f5b6b9fa137b462609edc4190ebf2e2809c8ee9f0db2741d",
+      "output_schema_sha256": "sha256:34af1215937193003deda9d8865ff4a0c12a0ebd1324657003752f898a166a96",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "add_data_breakpoint",
+      "description": "Installs a hardware ('break-on-access') data breakpoint at address_hex covering size bytes. size must be 1/2/4/8. access is any non-empty subset of ['read','write','execute','io']. x64 supports at most four enabled data breakpoints concurrently — the fifth fails at the next go_execution.",
+      "input_schema_sha256": "sha256:a1ac03b60592bde03450d7bca4814df5937a0e7c71877cd2e641857fc4e2256e",
+      "output_schema_sha256": "sha256:34af1215937193003deda9d8865ff4a0c12a0ebd1324657003752f898a166a96",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "addr_to_line",
+      "description": "Returns the source file, line, and displacement containing address via IDebugSymbols3::GetLineByOffsetWide. Requires private (line-info) PDBs. Errors with HRESULT 0x80000002 (E_NOTFOUND) if no line info is loaded — install matching PDBs or run reload_symbols.",
+      "input_schema_sha256": "sha256:b6260bd7abec49c65fc7af62ab72ceb3fa52008e02a0670e428051b2278913e9",
+      "output_schema_sha256": "sha256:0158b214afe11092b6a4964b1cf71f3e9ee0b53360e0fc3596ae65a22cea9854",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "addr_to_name",
+      "description": "Resolves an address to the nearest symbol and displacement (e.g. {symbol:'kernel32!CreateFileW', displacement:0x10}). Requires loaded symbols; otherwise returns the raw address.",
+      "input_schema_sha256": "sha256:5b85c5d94c52c8d873de2f689629fa90e439a4df7b008a77da3ac1bd9cd667a2",
+      "output_schema_sha256": "sha256:b0dd6d089c3304f409d14145f3e703fee11a1561af044de1f2a8da7916d28331",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "attach_kernel",
+      "description": "Attaches to a Windows kernel target over KDNET. Connection string is e.g. 'net:port=50000,key=W.X.Y.Z'. Long-running: pass timeout_seconds. Do NOT include target=... — that segment is for kdsrv routing and prevents the listener from starting. After this returns, call break_in then get_session_state.",
+      "input_schema_sha256": "sha256:097cd91b8a696bc55b5208ab58db6a660db3cb9cba5ba3995e960c1868d5e725",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "attach_process",
+      "description": "Attaches the engine to a running Windows user-mode process by PID. Requires no prior target. After this returns, call get_session_state to discover the new state, then get_threads and get_modules.",
+      "input_schema_sha256": "sha256:acb29efe39bed6136568a387651417e2697b1a609375d23137c0dd394ac27249",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "break_in",
+      "description": "Interrupts a running target and forces it to break. Thread-safe; can be called concurrently with go_execution to cancel a long-running resume. After return, call get_session_state to confirm broken_in.",
+      "input_schema_sha256": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "breakpoint_command",
+      "description": "Returns the WinDbg command string attached to a breakpoint by ID (empty if none was set via configure_breakpoint). Use to audit conditional breakpoints before resuming execution.",
+      "input_schema_sha256": "sha256:aef80facefe002bb85da745296eb1718de8fb4e3b9e3237026c7805637033a82",
+      "output_schema_sha256": "sha256:efcd767e81a864d776ee5d1d5757f469a0a9719f26d1cc0b3bae611597585186",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "bug_check",
+      "description": "Reads the kernel bugcheck record via IDebugControl4::ReadBugCheckData. Kernel-mode sessions only — user-mode targets return {found:false}. name and description are best-effort lookups for ~20 common codes; unknown codes still surface the raw code and four args.",
+      "input_schema_sha256": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e",
+      "output_schema_sha256": "sha256:72de8402616a33a44c308e802b38a56433f69664693a351565c2161afa74f88b",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "configure_breakpoint",
+      "description": "Applies non-positional configuration (pass count, thread filter, WinDbg command) to an existing breakpoint without recreating it. Each field is independently optional: pass_count=0 leaves alone; omit match_thread_id to leave alone or pass 0xFFFFFFFF for 'any thread'; omit command to leave alone.",
+      "input_schema_sha256": "sha256:9319f1aa749ed4a51d4b837400f573c203442c9b2f13a33e31ed8596b0348112",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "connect_remote",
+      "description": "Connects to a remote dbgsrv process server. Provide a connection string like 'tcp:port=12345,server=HOST'. After this returns, use the normal attach tools (attach_process, create_process) as if local.",
+      "input_schema_sha256": "sha256:fb4923f7ebb8039bd8964923c06c47063bf36b382a0b30287eaf13063679d49a",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "create_process",
+      "description": "Creates and attaches to a new Windows user-mode process from a command line. Useful for capturing startup. After this returns, the target is initially broken at the loader; call go_execution to let it run or get_stack to inspect.",
+      "input_schema_sha256": "sha256:c3e49e86f7da1ce1ee0fc1b178134cb379714c58d4e765da2d0e3f75ddd2eb91",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "detach",
+      "description": "Detaches the engine from the current target without terminating it. The MCP session stays alive; you can attach to a different target next. Call get_session_state after to confirm no_target.",
+      "input_schema_sha256": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "disassemble",
+      "description": "Disassembles up to count instructions starting at address. Default 8, max 1024. Requires symbols for best results (function names appear inline). truncated indicates the cap was applied.",
+      "input_schema_sha256": "sha256:1f9678f7cd2997caf93e076e4389f3739f95c251666680c8900055f1eea97fc8",
+      "output_schema_sha256": "sha256:f99a69085888fb4b1edad4e54b3938fa659bbe10cbe18223f6cff92511ac7508",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "disconnect_remote",
+      "description": "Disconnects from the dbgsrv process server. Releases the remote-side handles; the engine reverts to local-only mode. Any active target attached over the process server must be detached first.",
+      "input_schema_sha256": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "dump_memory",
+      "description": "Returns a kd-style hexdump (16 bytes per row, address + grouped hex + ASCII gutter) of virtual or physical memory. width is 1/2/4/8 bytes per group (default 1). Hard cap 4096 bytes. Set physical=true for kernel-mode physical reads.",
+      "input_schema_sha256": "sha256:b9fff907a567dd08a6ada73bb8c7e5693a09f7cbc947351cc023bc3240252e04",
+      "output_schema_sha256": "sha256:cf55ddf3774d470980889eba1a26728b8ebfee082fe475aa33a2d00760ca444c",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "dump_type",
+      "description": "Walks a typed object recursively (the 'dt -r' surface). Resolves type in module's symbol namespace, reads address_hex as that type, and recurses into struct fields up to max_depth levels (default 3). follow_ptrs dereferences non-NULL pointer fields one extra level with cycle detection. Special decoders surface _UNICODE_STRING (string), _LIST_ENTRY, GUID, _LARGE_INTEGER.",
+      "input_schema_sha256": "sha256:297df975a817bfc920d5321ab667c79e2852846982174c78732b05086cdc72f1",
+      "output_schema_sha256": "sha256:f1b2c73f1340301452f4d7008b6d7966ff5ae0a49f82ab61f1b726e9d419ee9c",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "enable_breakpoint",
+      "description": "Enables or disables a breakpoint by ID without removing it. Disabled breakpoints stay registered and keep their hit count; re-enable with enabled=true.",
+      "input_schema_sha256": "sha256:28438c810fb51036b2c3ec70c7bdf0e4352cf589036ab57f2da49e74e243f3d7",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "evaluate",
+      "description": "Evaluates a MASM or C++ expression in the engine's current context (e.g. 'nt!KiSystemServiceStart+0x40', 'sizeof(_EPROCESS)'). Affected by set_radix and set_expression_syntax. May stall on PDB downloads — pass timeout_seconds. Returns type, u64, f64, raw_hex, and remainder.",
+      "input_schema_sha256": "sha256:0076ea0323797995f181a34ac51abc8959a7a47f5c3a1dc96380430a1bad75ce",
+      "output_schema_sha256": "sha256:8f7c03ca716d8c95ffcfab4720af36cb5c99f9ab236257c23fef6ae9f78b4a36",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "execute_raw",
+      "description": "Executes an arbitrary kd command (e.g. '!process 0 0'). WARNING: prefer typed tools when available. Output is capped at 16 KiB inline; if the command produced more, the response sets truncated=true and continuation_token, which the caller passes to get_raw_output_continuation. Disabled in --readonly mode unless --unsafe-raw is also set.",
+      "input_schema_sha256": "sha256:1c5286cf083d9627639600903bb110c8e92a8b488b67319cadf75965b73f79a5",
+      "output_schema_sha256": "sha256:96ec486a97599d92b1bf41460a72c8b04ec7b5c63451d62779c1ea255bd38daf",
+      "annotations": {
+        "destructive_hint": true,
+        "open_world_hint": true
+      }
+    },
+    {
+      "name": "get_expression_syntax",
+      "description": "Returns the current expression syntax ('masm' or 'cpp'). Affects evaluate, breakpoint addresses, and dt-style commands. C++ is needed for scope-resolved names like MyClass::Method.",
+      "input_schema_sha256": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e",
+      "output_schema_sha256": "sha256:8291e4ae6ac55db40c53d057cf40601996d839b1990fbc8db34580956c5346a1",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "get_modules",
+      "description": "Lists loaded modules. Requires a target. Supports name_glob filter (e.g. 'nt!*'), offset, and limit (default 100, max 500). Use the returned next_offset for pagination.",
+      "input_schema_sha256": "sha256:44da78a7f79f4c470c0a3d556a2b884b7745cb32e9bbf8462228f7c24b930735",
+      "output_schema_sha256": "sha256:969274d3eedd5f300af5ec8db0b29ff5669b78d1fb2f913f3f029a8d85916b55",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "get_radix",
+      "description": "Returns the engine's current numeric radix (typically 10 or 16). Affects how evaluate parses literals and how DbgEng formats numbers in output. Most workflows want 16.",
+      "input_schema_sha256": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e",
+      "output_schema_sha256": "sha256:f79d7c454dc97954a5236848b30c4ecf369b45d70c2a8f60e13863a40a009bdc",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "get_raw_output_continuation",
+      "description": "Returns the remainder of an execute_raw response that exceeded the 16 KiB inline cap. offset (default 0) and limit (default 16384, max 16384) control the byte window. Returns expired=true once the LRU evicts the entry (8 entries / 512 KiB total).",
+      "input_schema_sha256": "sha256:d24e094ef40a20b766762db02f146f5c4e65c89cca26a51a89c02eaefa10910c",
+      "output_schema_sha256": "sha256:d02dc5331a7cabe31e2089bc5535c81f52f515e8d3e89e2198377c7cea5caa05",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "get_recent_events",
+      "description": "Returns events recorded by the drainer (breakpoint, exception, module loaded, process exited, etc.) since since_token. Paged via since_token + limit (default 32, max 32). Use this when your client does not subscribe to gokd/event notifications.",
+      "input_schema_sha256": "sha256:b3bfc1b02000fa6809e875200813d59e5cf29eaaf268ed24bdd7ea96fbd953ef",
+      "output_schema_sha256": "sha256:0f00f22c54515ce3281cc2f886ad53c835ee69f0e2440114043ce50f6b36fa77",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "get_recent_output",
+      "description": "Returns engine output lines recorded by the drainer since since_token. Paged via since_token + limit (default 64, max 256). Same fallback role as get_recent_events for clients without gokd/output notifications.",
+      "input_schema_sha256": "sha256:6bacb76d2bd0ab5b20178085ba0ec62e75fc74d7b2eae60a4e77ea3aa3346686",
+      "output_schema_sha256": "sha256:b1f7ed3fd3f1df2ad0f49f74ef2f4b16c74199e71b3e3ded7845067ca4bf7d11",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "get_registers",
+      "description": "Returns all named registers for the current thread (or a filtered subset by name). Requires the target to be broken in. Use set_thread first if you need a different thread's registers.",
+      "input_schema_sha256": "sha256:f09d1fad6f1f46d2efba950ebe1bc4268f16e741a5938d81d40444d128001bd8",
+      "output_schema_sha256": "sha256:c895bca17f8b722ed69e139ed3e3afe10293834b39d3c9e4c52c5fea1fe960d2",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "get_session_state",
+      "description": "Returns a one-shot snapshot of session state: attached/running/broken, target kind, current thread, last event, pending ring sizes, and a recommended_next_tools array tailored to the current state. Call this first whenever you are uncertain what to do next.",
+      "input_schema_sha256": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e",
+      "output_schema_sha256": "sha256:a46d1108f2580323f4836b3e1fb39859a1a3c1124fa74eaaa7ee933c4d3dfed8",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "get_stack",
+      "description": "Returns the call stack of the current thread. Requires the target to be broken in. Default cap 32 frames; pass max_frames up to 256. Truncated indicates the unwinder produced more frames than were returned.",
+      "input_schema_sha256": "sha256:2a3313657388157eb5558a2408785273bb6f0109ce28ecbd4ac315767fe75ef9",
+      "output_schema_sha256": "sha256:19114e0b34352ea719d8e8d41c12f9500f1a363d9891a291414b508c2c07fe60",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "get_symbol_path",
+      "description": "Returns the engine's current symbol search path (sympath). Standard form: 'srv*C:\\sym*https://msdl.microsoft.com/download/symbols'. Use set_symbol_path to change.",
+      "input_schema_sha256": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e",
+      "output_schema_sha256": "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "get_threads",
+      "description": "Lists all threads in the target with engine IDs and system IDs. Requires a target. Use set_thread to switch the engine's current thread before reading registers or stack.",
+      "input_schema_sha256": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e",
+      "output_schema_sha256": "sha256:f7bd894fb930ad61d308d1b1e76391fc0d8f37c43d7b568746149d3833c2d21b",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "get_type_fields",
+      "description": "Returns the field layout (name, offset, type) of a type using DbgHelp (e.g. 'nt!_EPROCESS'). Use inspect_struct to get the actual field values at an address. Hard cap 256 fields.",
+      "input_schema_sha256": "sha256:af7a0d97ed56464288c23ccf290bc579cd2a4a393c9ce11bca307be7d70a5fd5",
+      "output_schema_sha256": "sha256:d153d3a1ea9a4ac0cfa37743b91e3c69963993975c125e82270cd10ea8c56c15",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "get_type_size",
+      "description": "Returns the size in bytes of a type (e.g. 'nt!_EPROCESS'). Requires DbgHelp symbol information for the type. Useful for offset arithmetic and sanity-checks before inspect_struct.",
+      "input_schema_sha256": "sha256:af7a0d97ed56464288c23ccf290bc579cd2a4a393c9ce11bca307be7d70a5fd5",
+      "output_schema_sha256": "sha256:5d7d228955a9f3f75b00d73a60dbd5f4656c45dc6ba00597dc8774ebbd3d7b70",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "go_execution",
+      "description": "Resumes the target and blocks until it next breaks or timeout_seconds elapses (default 0 = wait forever). Cancellable via break_in. After return, inspect the StopEvent or call get_session_state.",
+      "input_schema_sha256": "sha256:b7a4b02f3e5e6069a00185986f3da037df3514e541cb9f462fdf2abc817abc1a",
+      "output_schema_sha256": "sha256:63fcbe80967a63ba05388ac65c40921df2c8143bdbd097d46c15d97d6304d075",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "inspect_struct",
+      "description": "Returns a structured field-by-field dump of an instance of a type at address. type_name must be qualified as 'module!type'. Optional recurse follows nested struct types up to depth 3. Total fields hard-capped at 1024 across all levels.",
+      "input_schema_sha256": "sha256:138dc48158f307d9829239fa8b11c22d565f469ddf74d9b58b9c7a717c491652",
+      "output_schema_sha256": "sha256:dbd23ecce451915cde3427f83a8341176bdae72911e91f38fcde7712e807bd17",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "last_exception",
+      "description": "Returns the most recent DEBUG_EVENT_EXCEPTION record reported by DbgEng (the .lastevent / .exr surface). Returns {found:false} when the last event was not an exception — e.g. an attach breakpoint or a process-exit notification. parameters carries raw EXCEPTION_RECORD.ExceptionInformation values.",
+      "input_schema_sha256": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e",
+      "output_schema_sha256": "sha256:dd26da34d8d01fa669203c7471e25f56a395b373ae3ac81fdbc4c63f6771e6b1",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "line_to_addr",
+      "description": "Returns the instruction address corresponding to a source file and line via IDebugSymbols3::GetOffsetByLineWide. The file path must match the canonical absolute path the PDB was built with; partial matches fail with E_NOTFOUND.",
+      "input_schema_sha256": "sha256:c2a034e72c988913f5b6b9fa137b462609edc4190ebf2e2809c8ee9f0db2741d",
+      "output_schema_sha256": "sha256:0de01a45ff55e9069a0c1e06ddd96ccf88b32ecbbb9a307c3f21aedecac9ba0c",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "list_breakpoints",
+      "description": "Lists every active breakpoint with ID, address, hit count, enabled flag, thread filter, and attached command. Requires a target. Use add_breakpoint to install new ones.",
+      "input_schema_sha256": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e",
+      "output_schema_sha256": "sha256:ee4839df16879ae7b04c8559f4b8bd746dfa76f72de73bfb3df99310146a4c34",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "name_to_addr",
+      "description": "Resolves a symbol name (e.g. 'notepad!WinMain') to a virtual address. Returns NOT_FOUND if unresolved; try reload_symbols or sym_fix first to load matching PDBs.",
+      "input_schema_sha256": "sha256:1b52576510e50c805d6cbb336a11157b190ea3566e47df0e3f33a651cebc148a",
+      "output_schema_sha256": "sha256:0de01a45ff55e9069a0c1e06ddd96ccf88b32ecbbb9a307c3f21aedecac9ba0c",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "open_dump",
+      "description": "Opens a Windows crash dump file as a passive target. Read-only: execution and breakpoints are inert. After this returns, call summarise_target for a high-level view or triage_crash for fault analysis.",
+      "input_schema_sha256": "sha256:6d6c63392d53c276b989282af64c13d2c5999695ef51f1db7b7b2e2509f331f3",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "query_region",
+      "description": "Returns the MEMORY_BASIC_INFORMATION64 record covering va_hex via IDebugDataSpaces4::QueryVirtual. Fields use raw Windows numerics: state (MEM_COMMIT=0x1000, MEM_RESERVE=0x2000, MEM_FREE=0x10000), type (MEM_PRIVATE=0x20000, MEM_MAPPED=0x40000, MEM_IMAGE=0x1000000), protect (PAGE_* flags).",
+      "input_schema_sha256": "sha256:a732678f1cbf8b576a3491764242cf417998fe923e1ed279680611af2a64a4bd",
+      "output_schema_sha256": "sha256:4932da8ea61da353edea1c5a721126ef4f2302bfb1fd36924f171c94849a8036",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "read_memory",
+      "description": "Reads up to 4096 bytes of virtual memory at address. Requires a target. Returns hex-encoded bytes. Call repeatedly with address+length to read larger ranges.",
+      "input_schema_sha256": "sha256:d98d0e3aa929a2e4d0ff6683acbe5d2b7a64e559c94e900a939cf1b1fc7e4b05",
+      "output_schema_sha256": "sha256:77e2a563c669347cac2085238fa20d18687a539fe91de9a6e6b11dc7a36a8b41",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "read_physical",
+      "description": "Reads up to 4096 bytes of physical memory. Kernel targets only. Returns hex-encoded bytes. User-mode targets fail with HRESULT 0x80004001 (E_NOTIMPL).",
+      "input_schema_sha256": "sha256:5e7dee689aac3ec14a02dd523b6b63bb55a030468657bc3422737d6aa2a22db1",
+      "output_schema_sha256": "sha256:77e2a563c669347cac2085238fa20d18687a539fe91de9a6e6b11dc7a36a8b41",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "read_string",
+      "description": "Reads a NUL-terminated string at address. encoding is 'ansi'|'utf16le'|'auto' (default auto). Default cap 256 bytes, max 4096. truncated=true when no NUL was found within the budget.",
+      "input_schema_sha256": "sha256:0c69c36ebf19f63a26aaca8bc270e0bff5784efd0490503289b8dfd3e0588f2f",
+      "output_schema_sha256": "sha256:fe264c7364c10b264ca9f05a90470e2d28c67d59e362446deff9f5cc45b7ae9f",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "reload_symbols",
+      "description": "Forces the engine to reload symbols for one module or all modules via IDebugSymbols3::ReloadWide. spec is forwarded verbatim ('', '/f', '/f \u003cmodule\u003e'). May download from the symbol server — pass timeout_seconds (default 0 = no timeout) to bound the wait. Use after set_symbol_path.",
+      "input_schema_sha256": "sha256:2a8a39cd390b2f07beaf3238a7f11aee4758545f932e0d441fa71a2f7b9c3be7",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "remove_breakpoint",
+      "description": "Deletes a breakpoint by ID. Returns ok=true. Use list_breakpoints first to discover IDs; enable_breakpoint with enabled=false is a non-destructive alternative.",
+      "input_schema_sha256": "sha256:aef80facefe002bb85da745296eb1718de8fb4e3b9e3237026c7805637033a82",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "search_memory",
+      "description": "Searches [start_hex, start_hex+length) for pattern_hex via IDebugDataSpaces4::SearchVirtual. granularity must be 1, 4, or 8 (default 1). Returns {found:false, match_hex:''} when absent so callers can loop. Keep length small (\u003c=4 KB) — SearchVirtual is slow on large ranges.",
+      "input_schema_sha256": "sha256:eac9958520545fcfb71ec6e4d1b1de8d7ba41fa4c6a2d473ab31c485fea278ac",
+      "output_schema_sha256": "sha256:9669e2bbd565b9f135e7c13ce3cb26ad2fedc239b2ca81481f1d62e707f7b1a5",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "set_expression_syntax",
+      "description": "Switches the expression syntax to 'masm' (DbgEng default) or 'cpp'. Mutates engine state. C++ is needed for scope-resolved names like MyClass::Method; otherwise prefer MASM.",
+      "input_schema_sha256": "sha256:82a36cf0a7e6edb66dac39d8a6323bc40aa8afa64965c7565daf54570201f9f8",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "set_radix",
+      "description": "Sets the engine's numeric radix to 10 or 16. Most workflows want 16. Mutates engine state — affects subsequent evaluate calls and DbgEng formatting.",
+      "input_schema_sha256": "sha256:503cc9a9bd0c5a1026b3dd56219414b702244362546b30a0d885252a4b15cbd8",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "set_register",
+      "description": "Sets a register value on the current thread. Requires the target to be broken in. Mutates target state — use only when steering execution; otherwise read with get_registers.",
+      "input_schema_sha256": "sha256:3d792bcc5437c68883d1771f084437ce01bfdc2e0be58ffa78b86fda089e76c5",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "set_symbol_path",
+      "description": "Sets the engine's symbol search path. Standard form: 'srv*C:\\sym*https://msdl.microsoft.com/download/symbols'. After this, call reload_symbols to make it effective.",
+      "input_schema_sha256": "sha256:3b4ae9b3b7f35f3a2c8d6a9d4291f96c8ae3312f884871006d2931d59529a3e2",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "set_thread",
+      "description": "Switches the engine's current thread by system thread ID. Affects what get_stack and get_registers return. Requires the target to be broken in.",
+      "input_schema_sha256": "sha256:06856a775081222827a8678382dab894c11b58a172bc20c6de91958fcd276aa6",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "step_in",
+      "description": "Steps a single instruction or source line, stepping into calls. Requires the target to be broken in. Returns the StopEvent. Use step_over to skip call instructions.",
+      "input_schema_sha256": "sha256:b7a4b02f3e5e6069a00185986f3da037df3514e541cb9f462fdf2abc817abc1a",
+      "output_schema_sha256": "sha256:63fcbe80967a63ba05388ac65c40921df2c8143bdbd097d46c15d97d6304d075",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "step_out",
+      "description": "Runs the target until the current function returns. Requires the target to be broken in. Returns the StopEvent at the return site. Useful for backing out of helpers.",
+      "input_schema_sha256": "sha256:b7a4b02f3e5e6069a00185986f3da037df3514e541cb9f462fdf2abc817abc1a",
+      "output_schema_sha256": "sha256:63fcbe80967a63ba05388ac65c40921df2c8143bdbd097d46c15d97d6304d075",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "step_over",
+      "description": "Steps a single instruction or source line, stepping over calls. Requires the target to be broken in. Returns the StopEvent. Use step_in to descend into calls.",
+      "input_schema_sha256": "sha256:b7a4b02f3e5e6069a00185986f3da037df3514e541cb9f462fdf2abc817abc1a",
+      "output_schema_sha256": "sha256:63fcbe80967a63ba05388ac65c40921df2c8143bdbd097d46c15d97d6304d075",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "summarise_target",
+      "description": "Returns a narrative summary of the target: full get_session_state, the first 20 modules, up to 32 threads, and a one-liner preview of any last exception or bug check. Use this immediately after open_dump or attach_kernel to orient.",
+      "input_schema_sha256": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e",
+      "output_schema_sha256": "sha256:5b75395f1cf7f826259afb88787d783d0dbfcc87e09ba37596e8219eeb0c5e28",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "sym_fix",
+      "description": "Installs the standard Microsoft public symbol server into the sympath (mirrors WinDbg .symfix). Pass an optional cache directory; empty uses a per-user default. Convenience for fresh sessions. Follow with reload_symbols to actually pull PDBs.",
+      "input_schema_sha256": "sha256:f4aa3b10b66ceaa81615ee31d368ead02c54c651977b106d97f88b0e3a2adcba",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "triage_crash",
+      "description": "One-shot crash triage: returns bug check (kernel) and/or last exception, faulting thread/frame, stack (capped by max_frames, default 32), all registers, ~11 instructions of nearby disassembly around the faulting RIP, the module containing the fault, and a human-readable summary. Call this first on any unfamiliar dump or freshly broken-in target.",
+      "input_schema_sha256": "sha256:2a954c0866ca6ca3362e2a3d9d25f88f8055c7cfe93f8cb7c7a3723fbee6540c",
+      "output_schema_sha256": "sha256:787c80a7f519b138fb1ebfbe6a2d9b0ef3391a03bf4c41d6d91813e1be9b8d5a",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "virtual_to_physical",
+      "description": "Translates a virtual address to a physical address via IDebugDataSpaces4::VirtualToPhysical. Kernel-mode sessions only; user-mode targets fail with HRESULT 0x80004001 (E_NOTIMPL) or similar.",
+      "input_schema_sha256": "sha256:93ac77867058be0bc2a58f22ba2f608a0d8aa61d2da2f25cb8355d32f1b64c68",
+      "output_schema_sha256": "sha256:d393fdfca2a605e42e5e2036b1d69581eb827a4932890437c3d779ed9610c18a",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "walk_stacks_all",
+      "description": "Returns call stacks for every thread (paged). Requires the target to be broken in. Caps: max_threads default 64 (max 256), max_frames default 32 (max 256). Best-effort restores current thread. Use this when triaging a hang.",
+      "input_schema_sha256": "sha256:cab9ba07f65e4bd1067e8a6a7e6733d27dae9398df0f43943d43bb2a1bd5fff0",
+      "output_schema_sha256": "sha256:316fb2768f5ea407bd9503ef743b9994d2a5ef54aa641145782cd95e5d0cf3f4",
+      "annotations": {
+        "read_only_hint": true
+      }
+    },
+    {
+      "name": "write_dump",
+      "description": "Snapshots the current target to a .dmp file via IDebugClient5::WriteDumpFileWide. path must be absolute. kind is 'small'|'default'|'full' (default 'default'). flags is the raw DEBUG_FORMAT_USER_SMALL_* bitmask. Synchronous and uncancellable mid-call; default timeout_seconds is 600.",
+      "input_schema_sha256": "sha256:7ad8302786a5633d428e4b35c224c7a34fb319c40b566a4a48593ed3f8e73e9f",
+      "output_schema_sha256": "sha256:4528a3c79c4aaee242a31e586366657f8e9a3f11cc8d2cb040d9bf61ab1bbb63",
+      "annotations": {
+        "destructive_hint": true
+      }
+    },
+    {
+      "name": "write_memory",
+      "description": "Writes hex-encoded bytes to virtual memory at address. Requires the target to be broken in. Mutates target memory — use only when you intend to alter target state.",
+      "input_schema_sha256": "sha256:1def86aa52a80d7be16b5ef73b11586643cecac7fa4c31d6e01931101dfe4aa3",
+      "output_schema_sha256": "sha256:79a9412862f971fc82dc38621aa70f3b4b391beabbc02315c2e956d0a1473ab2",
+      "annotations": {
+        "destructive_hint": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,79 @@
+{
+  "prompts": [
+    {
+      "name": "attach-and-orient",
+      "description": "Attach to a live user-mode process and gather orientation.",
+      "arguments": [
+        {
+          "name": "pid",
+          "description": "Decimal PID.",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "find-who-wrote",
+      "description": "Find which thread wrote to a given address.",
+      "arguments": [
+        {
+          "name": "address",
+          "description": "Hex address being written, e.g. 0x7ff600401000.",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "inspect-object",
+      "description": "Inspect a typed object in memory and follow one pointer level.",
+      "arguments": [
+        {
+          "name": "type_name",
+          "description": "Type name, e.g. nt!_EPROCESS.",
+          "required": true
+        },
+        {
+          "name": "address",
+          "description": "Hex address of the instance.",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "kernel-attach-kdnet",
+      "description": "Attach to a Windows kernel target over KDNET and orient.",
+      "arguments": [
+        {
+          "name": "port",
+          "description": "KDNET UDP port, e.g. 50000.",
+          "required": true
+        },
+        {
+          "name": "key",
+          "description": "KDNET key, e.g. 1.2.3.4.",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "triage-dump",
+      "description": "Step-by-step triage of an unfamiliar crash dump.",
+      "arguments": [
+        {
+          "name": "dump_path",
+          "description": "Absolute path to the .dmp file on the debugger host.",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "why-blocked",
+      "description": "Diagnose why a thread is blocked.",
+      "arguments": [
+        {
+          "name": "thread_id",
+          "description": "System thread ID. Defaults to the current thread."
+        }
+      ]
+    }
+  ]
+}
