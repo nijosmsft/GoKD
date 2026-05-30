@@ -141,6 +141,10 @@ extern "C" int32_t gokd_attach_kernel(gokd_session_t handle,
                                        uint32_t flags) {
     S;
 
+    /* Clear any stale cancellation request from a previous operation
+     * so it doesn't abort this legitimate wait. */
+    s->cancel_requested = 0;
+
     s->control->AddEngineOptions(DEBUG_ENGOPT_INITIAL_BREAK);
 
     HRESULT hr = s->client->AttachKernel(DEBUG_ATTACH_KERNEL_CONNECTION, options);
@@ -157,14 +161,28 @@ extern "C" int32_t gokd_attach_kernel(gokd_session_t handle,
         s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
     }
 
-    /* Kernel attach can take a long time (waiting for target to break).
-     * The first KDNET wait must be a single INFINITE call. DbgEng returns
-     * E_NOTIMPL immediately for finite waits while the kernel transport is
-     * still handshaking, leaving ExecutionStatus at NO_DEBUGGEE forever.
-     * Once this call succeeds, the session is established and the normal
-     * cancellable polling wait can be used for subsequent execution control.
-     */
-    hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, INFINITE);
+    /* Kernel attach can take a long time. We can't use a single
+     * INFINITE WaitForEvent because the Go side has no way to cancel
+     * it — gokd_cancel_wait sets a flag we poll. But finite waits
+     * during the KDNET handshake legitimately return E_NOTIMPL until
+     * the transport is live, so we treat that as "keep polling" rather
+     * than terminal failure. */
+    const ULONG POLL_INTERVAL = 500; /* ms */
+    for (;;) {
+        if (s->cancel_requested) {
+            s->cancel_requested = 0;
+            s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
+            hr = HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED);
+            SET_LAST_ERROR(hr);
+            return hr;
+        }
+        hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, POLL_INTERVAL);
+        if (hr == S_OK) break;                       /* handshake complete */
+        if (hr == (HRESULT)S_FALSE) continue;        /* poll timeout */
+        if (hr == E_NOTIMPL) continue;               /* KDNET still handshaking */
+        if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
+    }
+
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -265,6 +283,8 @@ extern "C" int32_t gokd_disconnect_remote(gokd_session_t handle) {
 static int32_t execute_and_wait(gokd_session *s, ULONG status,
                                 gokd_stop_event_t *out) {
     memset(&s->last_stop, 0, sizeof(s->last_stop));
+    /* Clear stale cancel-request from a previous op. */
+    s->cancel_requested = 0;
 
     HRESULT hr = s->control->SetExecutionStatus(status);
     if (FAILED(hr)) { s->last_error = hr; return hr; }
@@ -323,15 +343,16 @@ extern "C" int32_t gokd_step_out(gokd_session_t handle,
     /* DbgEng doesn't have a direct "step out" status; use Execute. */
     HRESULT hr;
     memset(&s->last_stop, 0, sizeof(s->last_stop));
+    s->cancel_requested = 0;
 
-    
-        hr = s->control->Execute(DEBUG_OUTCTL_ALL_CLIENTS, "gu",
-                                  DEBUG_EXECUTE_NOT_LOGGED);
+    hr = s->control->Execute(DEBUG_OUTCTL_ALL_CLIENTS, "gu",
+                              DEBUG_EXECUTE_NOT_LOGGED);
 
     if (FAILED(hr)) { s->last_error = hr; return hr; }
 
-    
-        hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, INFINITE);
+    /* Use the cancellable poll wait so a Go-side cancel can interrupt
+     * a runaway step-out the same way it can interrupt Go/StepIn/etc. */
+    hr = wait_for_event_cancellable(s, 0 /* infinite */);
 
     if (FAILED(hr)) { s->last_error = hr; return hr; }
 
