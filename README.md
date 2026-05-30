@@ -7,23 +7,131 @@ GoKD wraps DbgEng's COM interfaces and DbgHelp's symbol APIs in a flat C shim an
 them as an idiomatic Go API. No text parsing; structured Go types everywhere. Single
 process, no IPC — the C++ shim is statically linked into your Go binary via CGo.
 
+It also ships an **MCP server** (`cmd/gokd-mcp/`) so AI clients (Copilot CLI,
+Claude Desktop, Cursor, etc.) can drive a real DbgEng session through 33
+structured tools — locally, over TCP, or proxied to a remote lab machine.
+
 See [PLAN.md](PLAN.md) for the original design document and [CLAUDE.md](CLAUDE.md) for
 contributor / agent guidance.
 
-## Capabilities
+---
 
-| Target type | Status |
-|---|---|
-| User-mode process (attach / create-process / detach) | Working |
-| Kernel-mode via KDNET / serial / USB | Working (KDNET verified) |
-| Crash dump (`.dmp`, minidump) | Working |
-| Remote debugging via `dbgsrv.exe` | Working |
+## Install (TL;DR)
 
-Supported operations: memory read/write (virtual + physical), registers, stack walking
-with symbols, threads, modules, type info (DbgHelp PDB walking), breakpoints, disassembly,
-async event + output channels, `context.Context`-based cancellation.
+You have two choices:
 
-## Prerequisites
+1. **Let an LLM do it for you** — copy the prompt in [§ One-shot install via
+   LLM](#one-shot-install-via-llm) into Copilot CLI / Claude / Cursor and the
+   agent will install MSYS2, clone the repo, build everything, drop the
+   binaries into `bin\`, and wire up your MCP config.
+2. **Install manually** — follow [§ Manual install](#manual-install).
+
+Either path ends with `bin\gokd-mcp.exe` ready to go and a `gokd` entry in your
+MCP client config.
+
+---
+
+## One-shot install via LLM
+
+Paste the prompt below into any agentic LLM that can run shell commands on
+your Windows box (GitHub Copilot CLI, Claude with the Computer-Use / desktop
+agent, Cursor with terminal access, etc.). The agent will do every step for
+you and verify the result.
+
+> **Prerequisites the LLM cannot install for you**: you need to be on
+> **Windows 10 or 11 x64** with administrator rights for `winget`, and you
+> need the **Windows SDK Debugging Tools** present at
+> `C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\dbgeng.dll`.
+> If you don't have them, install the "Debugging Tools for Windows" component
+> via the Windows SDK installer (`winget install Microsoft.WindowsSDK`) before
+> running the prompt.
+
+````
+You are going to install and configure the GoKD MCP server on this Windows
+machine. GoKD is a Go library + MCP server for Windows kernel- and user-mode
+debugging built on Microsoft's DbgEng engine. The MCP server exposes 33 tools
+(attach_process, get_modules, get_stack, read_memory, add_breakpoint, etc.)
+over stdio so an MCP-aware AI client can drive a real debugger session.
+
+Do all of the following without asking me for confirmation between steps.
+Tell me what you're doing as you go, and stop only if something fails.
+
+1. Verify prerequisites:
+   - Windows 10 or 11 x64. Bail with a clear message otherwise.
+   - `dbgeng.dll` exists at
+     `C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\dbgeng.dll`.
+     If missing, tell me to install "Debugging Tools for Windows" from the
+     Windows SDK installer and stop.
+
+2. Install Go 1.25+ if `go version` doesn't show one already:
+       winget install GoLang.Go --accept-source-agreements --accept-package-agreements --silent
+   Add `C:\Program Files\Go\bin` to PATH if needed; verify `go version` works
+   in a fresh shell.
+
+3. Install MSYS2 + the MinGW-w64 GCC toolchain (CGo on Windows needs g++ and
+   make, which the Visual Studio toolchain cannot provide for this codebase):
+       winget install MSYS2.MSYS2 --accept-source-agreements --accept-package-agreements --silent
+   Then from `C:\msys64\usr\bin\bash.exe -lc`:
+       pacman -S --noconfirm --needed mingw-w64-x86_64-gcc make git
+   Verify `C:\msys64\mingw64\bin\g++.exe --version` prints a g++ 13+ banner.
+
+4. Clone GoKD into `C:\git\gokd` (or another path of your choice; reuse the
+   existing checkout if it's already there):
+       git clone https://github.com/nijosmsft/gokd.git C:\git\gokd
+
+5. Build the C++ shim and the Go binaries from the MSYS2 MinGW64 shell.
+   IMPORTANT: leave WINDBG_SDK unset — MinGW has its own dbgeng.h and
+   dbghelp.h that we want; the Windows Kits headers use MSVC-only macros that
+   g++ cannot compile. Run, all in one process:
+
+       & 'C:\msys64\usr\bin\bash.exe' -lc "export PATH=/mingw64/bin:/c/Program\ Files/Go/bin:/c/Program\ Files/Git/bin:\$PATH && cd /c/git/gokd && unset WINDBG_SDK WINDOWS_SDK_INCLUDE && export GOOS=windows GOARCH=amd64 CGO_ENABLED=1 && make -C cshim && mkdir -p bin && go build -o bin/gokd.exe ./cmd/gokd && go build -o bin/gokd-mcp.exe ./cmd/gokd-mcp"
+
+   The first build takes ~2 minutes. Confirm `C:\git\gokd\bin\gokd-mcp.exe`
+   exists and is ~15 MB.
+
+6. Smoke-test the engine. From an ordinary PowerShell (not MSYS2):
+       C:\git\gokd\bin\gokd-mcp.exe -help
+   Expect a usage banner that mentions `-attach`, `-create`, `-dump`,
+   `-listen`, `-remote`, `-symbols`, `-log`.
+
+7. Register the MCP server in the user's MCP client. Detect which clients are
+   present and add a `gokd` entry to each found config file. The entry is:
+
+       {
+         "command": "C:\\git\\gokd\\bin\\gokd-mcp.exe",
+         "args": ["-log", "C:\\git\\gokd\\gokd-mcp.log"]
+       }
+
+   Common config locations on Windows (create the file if missing, otherwise
+   merge under the existing `mcpServers` object):
+     - Copilot CLI:    %USERPROFILE%\.copilot\mcp-config.json
+     - Claude Desktop: %APPDATA%\Claude\claude_desktop_config.json
+     - Cursor:         %USERPROFILE%\.cursor\mcp.json
+
+   Preserve any existing entries; do not overwrite them.
+
+8. Tell me:
+   - Which clients you updated and the path you wrote to.
+   - That I need to restart the MCP client for the new server to load.
+   - That after restart I can verify with a tool call like:
+       attach_process pid=<some notepad pid>
+       get_modules
+       detach
+   - The MCP server log is at C:\git\gokd\gokd-mcp.log.
+
+If any step fails, dump the full output of the failing command and stop —
+don't try to fix builds by editing source files in this repo without my
+permission.
+````
+
+After the agent finishes, restart your MCP client and you should see the
+`gokd` server with 33 tools available.
+
+---
+
+## Manual install
+
+### Prerequisites
 
 | Requirement | Notes |
 |---|---|
@@ -33,20 +141,24 @@ async event + output channels, `context.Context`-based cancellation.
 | Windows SDK Debugging Tools | Provides `dbgeng.dll` with KDNET transports |
 | `_NT_SYMBOL_PATH` (optional) | e.g. `srv*C:\symbols*https://msdl.microsoft.com/download/symbols` |
 
-## Install the toolchain
+### Toolchain
 
 ```powershell
-# 1. Install MSYS2 (provides MinGW-w64). ~1 GB, ~5 min.
+# 1. Install Go (~5 min, ~400 MB).
+winget install GoLang.Go --accept-source-agreements --accept-package-agreements --silent
+
+# 2. Install MSYS2 (~5 min, ~1 GB).
 winget install MSYS2.MSYS2 --accept-source-agreements --accept-package-agreements --silent
 
-# 2. From the MSYS2 MinGW64 shell (C:\msys64\usr\bin\bash.exe -l), install the toolchain:
-pacman -S --noconfirm --needed mingw-w64-x86_64-gcc make
+# 3. From the MSYS2 MinGW64 shell (C:\msys64\usr\bin\bash.exe -l):
+pacman -S --noconfirm --needed mingw-w64-x86_64-gcc make git
 ```
 
 Verify:
 
 ```powershell
-C:\msys64\mingw64\bin\g++.exe --version   # expect g++ 16.x+
+go version                                # expect go1.25+
+C:\msys64\mingw64\bin\g++.exe --version   # expect g++ 13.x+
 C:\msys64\usr\bin\make.exe --version      # expect GNU Make 4.x
 ```
 
@@ -57,11 +169,13 @@ Windows SDK installer. By default they land at:
 C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\dbgeng.dll
 ```
 
-## Build
+### Clone + build
 
 ```bash
+git clone https://github.com/nijosmsft/gokd.git C:\git\gokd
+
 # Open the MSYS2 MinGW64 shell (NOT the plain MSYS shell)
-cd /c/path/to/gokd
+cd /c/git/gokd
 
 # Step 1: build the C++ shim into a static library.
 # IMPORTANT: leave WINDBG_SDK unset. MinGW ships its own dbgeng.h / dbghelp.h
@@ -73,6 +187,8 @@ make -C cshim                              # produces cshim/lib/libgokd_shim.a
 
 # Step 2: build / test the Go code (CGo links the static lib).
 go build ./...
+go build -o bin/gokd.exe     ./cmd/gokd
+go build -o bin/gokd-mcp.exe ./cmd/gokd-mcp
 go test -v -run TestSessionCreateClose .   # smallest smoke test
 ```
 
@@ -83,7 +199,46 @@ A successful smoke test prints:
 --- PASS: TestSessionCreateClose
 ```
 
-## Quick start
+### Register with your MCP client
+
+Add a `gokd` entry to your client's config:
+
+| Client | Config path |
+|---|---|
+| Copilot CLI | `%USERPROFILE%\.copilot\mcp-config.json` |
+| Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Cursor | `%USERPROFILE%\.cursor\mcp.json` |
+
+```json
+{
+  "mcpServers": {
+    "gokd": {
+      "command": "C:\\git\\gokd\\bin\\gokd-mcp.exe",
+      "args": ["-log", "C:\\git\\gokd\\gokd-mcp.log"]
+    }
+  }
+}
+```
+
+Restart the client. The 33 GoKD tools should now be available.
+
+---
+
+## Capabilities
+
+| Target type | Status |
+|---|---|
+| User-mode process (attach / create-process / detach) | Working |
+| Kernel-mode via KDNET / serial / USB | Working (KDNET verified) |
+| Crash dump (`.dmp`, minidump) | Working |
+| Remote debugging via `dbgsrv.exe` | Working |
+| Remote debugging via lablink agent (`-remote NODE`) | Working |
+
+Supported operations: memory read/write (virtual + physical), registers, stack walking
+with symbols, threads, modules, type info (DbgHelp PDB walking), breakpoints, disassembly,
+async event + output channels, `context.Context`-based cancellation.
+
+## Quick start (library)
 
 ```go
 package main
@@ -166,42 +321,38 @@ Commands:
 
 ## MCP server
 
-GoKD also ships a stateful MCP server at `cmd/gokd-mcp/`. It exposes the public
-`gokd.Session` API as tools over stdio, so an MCP host can attach/open a target and then
-inspect modules, threads, registers, stack frames, memory, symbols, types, breakpoints,
-execution control, and raw DbgEng commands.
+GoKD ships a stateful MCP server at `cmd/gokd-mcp/`. It exposes the public
+`gokd.Session` API as **33 tools** that an MCP host can call to attach/open a
+target and then inspect modules, threads, registers, stack frames, memory,
+symbols, types, breakpoints, execution control, and raw DbgEng commands.
 
-Build it from the MSYS2 MinGW64 shell the same way as the CLI:
+If you followed the [install](#install-tldr) section above, the server is
+already built and registered. This section covers the tool catalogue, the
+non-default transport modes (`-listen`, `-remote`), and operational details.
 
-```bash
-unset WINDBG_SDK WINDOWS_SDK_INCLUDE
-go build -o bin/gokd-mcp.exe ./cmd/gokd-mcp
-```
+### Tool catalogue (33 tools)
 
-Example MCP configuration for Claude Desktop or Copilot CLI
-(`%USERPROFILE%\.copilot\mcp-config.json` on Windows):
+| Category | Tools |
+|---|---|
+| Target lifecycle | `attach_process`, `create_process`, `open_dump`, `attach_kernel`, `detach`, `connect_remote`, `disconnect_remote` |
+| Modules & symbols | `get_modules`, `get_type_fields`, `get_type_size`, `addr_to_name`, `name_to_addr` |
+| Threads & registers | `get_threads`, `set_thread`, `get_registers`, `set_register`, `get_stack` |
+| Memory | `read_memory`, `write_memory`, `read_physical` |
+| Breakpoints | `add_breakpoint`, `remove_breakpoint`, `enable_breakpoint`, `list_breakpoints` |
+| Execution control | `go_execution`, `step_in`, `step_over`, `step_out`, `break_in` |
+| Code inspection | `disassemble` |
+| Engine | `get_symbol_path`, `set_symbol_path`, `execute_raw` (raw DbgEng escape hatch) |
 
-```json
-{
-  "mcpServers": {
-    "gokd": {
-      "command": "C:\\git\\gokd\\bin\\gokd-mcp.exe",
-      "args": ["-log", "C:\\git\\gokd\\gokd-mcp.log"]
-    }
-  }
-}
-```
+The server uses stdout for JSON-RPC only. Engine output and optional MCP
+logging go to stderr, or to the path passed with `-log`.
 
-Pass `-symbols PATH` to override the default symbol path (Microsoft public symbols +
-per-user cache via `WithDefaultSymbols`).
+Pass `-symbols PATH` to override the default symbol path (Microsoft public
+symbols + per-user cache via `WithDefaultSymbols`).
 
-The server uses stdout for JSON-RPC only. Engine output and optional MCP logging go to
-stderr, or to the path passed with `-log`.
-
-A self-contained end-to-end test exists at `cmd/gokd-mcp/e2e_test.go` (under the
-`manual` build tag) that spawns the server, attaches to a real `notepad.exe`, and
-walks through `get_modules`, `get_threads`, `get_registers`, `get_stack`, and
-`detach`. Run with:
+A self-contained end-to-end test exists at `cmd/gokd-mcp/e2e_test.go` (under
+the `manual` build tag) that spawns the server, attaches to a real
+`notepad.exe`, and walks through `get_modules`, `get_threads`,
+`get_registers`, `get_stack`, and `detach`:
 
 ```bash
 go test -tags manual -v -run TestMCPEndToEnd ./cmd/gokd-mcp/
@@ -209,8 +360,8 @@ go test -tags manual -v -run TestMCPEndToEnd ./cmd/gokd-mcp/
 
 ### Transport modes
 
-`gokd-mcp` speaks the same set of 33 MCP tools regardless of how it's invoked.
-The flags decide where the engine actually runs:
+`gokd-mcp` speaks the same 33 tools regardless of how it's invoked. The
+flags decide where the engine actually runs:
 
 | Flag | Engine runs on | Use when |
 |---|---|---|
@@ -374,7 +525,7 @@ gokd.go                  Public Session interface + impl
 gokd_test.go             User-mode tests (notepad target)
 gokd_kernel_test.go      KDNET attach test
 gokd_diag_test.go        CreateProcess diagnostics
-go.mod                   Module: github.com/nijosmsft/gokd, go 1.22
+go.mod                   Module: github.com/nijosmsft/gokd, go 1.25
 
 internal/dbgcgo/
   dbgeng.go              CGo wrappers + dispatch goroutine
@@ -389,6 +540,8 @@ cshim/
   Makefile               Builds lib/libgokd_shim.a (MinGW-w64)
 
 cmd/gokd/                Reference interactive debugger (REPL)
+cmd/gokd-mcp/            MCP server (33 tools) — stdio, -listen, -remote
+scripts/                 Manual smoke drivers (manual build tag)
 
 PLAN.md, CLAUDE.md, README.md, LICENSE
 ```
