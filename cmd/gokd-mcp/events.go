@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sync"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/nijosmsft/gokd"
 )
 
@@ -155,16 +157,50 @@ func (s *srv) pushOutput(line string) ringOutput {
 }
 
 // drainer pumps the Session's event and output channels into the srv's
-// ring buffers. It runs in its own goroutine for the life of the session.
-// Tier 2 t2-6 will extend it to broadcast notifications; for now it is
-// a strict superset of the previous startAsyncDrainers behaviour.
+// ring buffers and (optionally) broadcasts them as MCP logging
+// notifications to every connected ServerSession on every registered
+// *mcp.Server. The set of servers is mutable: the listen loop calls
+// d.addServer(...) for every new connection.
 type drainer struct {
 	s      *srv
 	logger *log.Logger
+
+	mu      sync.Mutex
+	servers []*mcp.Server
+
+	outBatch outputBatcher
+	prevLast string
 }
+
+// outputBatcher coalesces output lines that arrive within a short window
+// into a single notification, to keep noisy targets from saturating the
+// notification channel. The buffer flushes when:
+//   - the running byte count reaches outputCap, OR
+//   - the window timer fires (outputWindow after the first buffered line).
+type outputBatcher struct {
+	mu      sync.Mutex
+	buf     []ringOutput
+	bytes   int
+	timer   *time.Timer
+	pending bool
+}
+
+const (
+	outputWindow = 100 * time.Millisecond
+	outputCap    = 4096
+)
 
 func newDrainer(s *srv, logger *log.Logger) *drainer {
 	return &drainer{s: s, logger: logger}
+}
+
+// addServer registers an *mcp.Server with the drainer. Broadcasts after
+// this call fan out to every ServerSession owned by sv, in addition to
+// any previously registered servers.
+func (d *drainer) addServer(sv *mcp.Server) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.servers = append(d.servers, sv)
 }
 
 func (d *drainer) run(sess gokd.Session) {
@@ -174,6 +210,12 @@ func (d *drainer) run(sess gokd.Session) {
 			if d.logger != nil {
 				d.logger.Printf("[event] %s", entry.Description)
 			}
+			d.broadcast(context.Background(), &mcp.LoggingMessageParams{
+				Logger: "gokd/event",
+				Level:  "info",
+				Data:   entry,
+			})
+			d.maybeStateChanged(context.Background())
 		}
 	}()
 	go func() {
@@ -182,6 +224,100 @@ func (d *drainer) run(sess gokd.Session) {
 			if d.logger != nil {
 				d.logger.Print(entry.Text)
 			}
+			d.queueOutput(entry)
 		}
 	}()
+}
+
+// broadcast fires a logging notification to every ServerSession on every
+// registered server. Errors (closed sessions, slow clients, no subscriber)
+// are intentionally swallowed: a debugger drainer must not block on a
+// misbehaving client.
+func (d *drainer) broadcast(ctx context.Context, params *mcp.LoggingMessageParams) {
+	d.mu.Lock()
+	servers := append([]*mcp.Server(nil), d.servers...)
+	d.mu.Unlock()
+	for _, sv := range servers {
+		for ss := range sv.Sessions() {
+			_ = ss.Log(ctx, params)
+		}
+	}
+}
+
+// queueOutput appends one ringOutput to the in-flight batch and arms (or
+// re-arms) the flush timer. If appending pushes the batch over outputCap,
+// flush immediately.
+func (d *drainer) queueOutput(entry ringOutput) {
+	d.outBatch.mu.Lock()
+	d.outBatch.buf = append(d.outBatch.buf, entry)
+	d.outBatch.bytes += len(entry.Text)
+	overflow := d.outBatch.bytes >= outputCap
+	if !d.outBatch.pending {
+		d.outBatch.pending = true
+		d.outBatch.timer = time.AfterFunc(outputWindow, func() {
+			d.flushOutput()
+		})
+	}
+	d.outBatch.mu.Unlock()
+	if overflow {
+		d.flushOutput()
+	}
+}
+
+// flushOutput drains the current batch into one notification. Safe to
+// call concurrently from the cap-exceeded path and from the timer.
+func (d *drainer) flushOutput() {
+	d.outBatch.mu.Lock()
+	if len(d.outBatch.buf) == 0 {
+		d.outBatch.pending = false
+		d.outBatch.mu.Unlock()
+		return
+	}
+	batch := d.outBatch.buf
+	d.outBatch.buf = nil
+	d.outBatch.bytes = 0
+	d.outBatch.pending = false
+	if d.outBatch.timer != nil {
+		d.outBatch.timer.Stop()
+		d.outBatch.timer = nil
+	}
+	d.outBatch.mu.Unlock()
+
+	d.broadcast(context.Background(), &mcp.LoggingMessageParams{
+		Logger: "gokd/output",
+		Level:  "debug",
+		Data:   batch,
+	})
+}
+
+// stateChangedEntry is the payload of a gokd/state_changed notification.
+type stateChangedEntry struct {
+	Kind       string    `json:"kind"`
+	At         time.Time `json:"at"`
+	TargetKind string    `json:"target_kind,omitempty"`
+	TargetName string    `json:"target_name,omitempty"`
+}
+
+// maybeStateChanged emits a synthetic notification when sessionStatus.lastKind
+// transitions to a new value. Tracked locally on the drainer so we don't
+// need to mutate srv state on every event.
+func (d *drainer) maybeStateChanged(ctx context.Context) {
+	if d.s == nil || d.s.status == nil {
+		return
+	}
+	kind, name, last := d.s.status.snapshot()
+	if last == "" || last == d.prevLast {
+		return
+	}
+	d.prevLast = last
+	d.broadcast(ctx, &mcp.LoggingMessageParams{
+		Logger: "gokd/state_changed",
+		Level:  "info",
+		Data: stateChangedEntry{
+			Kind:       last,
+			At:         time.Now().UTC(),
+			TargetKind: kind,
+			TargetName: name,
+		},
+	})
 }

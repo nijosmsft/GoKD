@@ -76,6 +76,7 @@ func main() {
 			Logger:       slog.New(slog.NewTextHandler(logWriter, nil)),
 		})
 		registerTools(s, state)
+		drain.addServer(s)
 		return s
 	}
 
