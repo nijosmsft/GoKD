@@ -67,12 +67,10 @@ static HRESULT wait_for_event_cancellable(gokd_session *s, ULONG timeout_ms) {
 
         HRESULT hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, this_timeout);
         if (hr == S_OK) return S_OK;   /* Event received. */
-        /* S_FALSE = timeout. E_NOTIMPL = transport not ready (retry for
-         * kernel targets). Any other failure is terminal. */
-        if (FAILED(hr) && hr != (HRESULT)S_FALSE && hr != E_NOTIMPL)
+        /* S_FALSE = timeout on this iteration. Any failure is terminal. */
+        if (FAILED(hr) && hr != (HRESULT)S_FALSE)
             return hr;
 
-        /* S_FALSE = timeout on this iteration. */
         elapsed += this_timeout;
         if (timeout_ms != 0 && elapsed >= timeout_ms)
             return S_FALSE; /* Overall timeout. */
@@ -127,8 +125,6 @@ extern "C" int32_t gokd_attach_kernel(gokd_session_t handle,
     s->control->AddEngineOptions(DEBUG_ENGOPT_INITIAL_BREAK);
 
     HRESULT hr = s->client->AttachKernel(DEBUG_ATTACH_KERNEL_CONNECTION, options);
-    fprintf(stderr, "[gokd] AttachKernel('%s', flags=0x%x) returned 0x%08x\n",
-            options, (unsigned)flags, (unsigned)hr);
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
     /* Actively request a break-in so the wait below has something to
@@ -139,14 +135,17 @@ extern "C" int32_t gokd_attach_kernel(gokd_session_t handle,
      * soon as the link is live. Ignore the return: any failure just
      * means we fall back to the original passive wait behaviour. */
     if (flags & GOKD_KERNEL_INITIAL_BREAK_IN) {
-        HRESULT ihr = s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
-        fprintf(stderr, "[gokd] SetInterrupt(ACTIVE) returned 0x%08x\n",
-                (unsigned)ihr);
+        s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
     }
 
     /* Kernel attach can take a long time (waiting for target to break).
-     * Use cancellable infinite wait so the Go side can abort. */
-    hr = wait_for_event_cancellable(s, 0 /* infinite */);
+     * The first KDNET wait must be a single INFINITE call. DbgEng returns
+     * E_NOTIMPL immediately for finite waits while the kernel transport is
+     * still handshaking, leaving ExecutionStatus at NO_DEBUGGEE forever.
+     * Once this call succeeds, the session is established and the normal
+     * cancellable polling wait can be used for subsequent execution control.
+     */
+    hr = s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, INFINITE);
     SET_LAST_ERROR(hr);
     return hr;
 }
@@ -304,9 +303,15 @@ extern "C" int32_t gokd_break_in(gokd_session_t handle) {
 }
 
 extern "C" void gokd_cancel_wait(gokd_session_t handle) {
-    /* Thread-safe: sets a volatile flag checked by the dispatch thread. */
+    /* Thread-safe: sets a volatile flag checked by the cancellable
+     * polling wait, AND issues SetInterrupt(ACTIVE) directly so a
+     * non-cancellable INFINITE WaitForEvent (used by gokd_attach_kernel
+     * to drive the initial KDNET handshake) also unblocks. SetInterrupt
+     * is documented as callable from any thread. */
     gokd_session *s = gokd_get_session(handle);
-    if (s) s->cancel_requested = 1;
+    if (!s) return;
+    s->cancel_requested = 1;
+    if (s->control) s->control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
 }
 
 /* ====================================================================== */

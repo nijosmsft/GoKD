@@ -145,8 +145,18 @@ extern "C" gokd_session_t gokd_create_session(void) {
     gokd_session *s = (gokd_session *)calloc(1, sizeof(gokd_session));
     if (!s) return 0;
 
+    /* DbgEng requires COM. The header has always documented that we
+     * call CoInitializeEx(MTA); keep the implementation in sync. */
+    HRESULT cohr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (cohr == RPC_E_CHANGED_MODE) {
+        free(s);
+        return 0;
+    }
+    s->com_initialised = SUCCEEDED(cohr);
+
     /* Load dbgeng.dll dynamically (once per process). */
     if (!load_dbgeng()) {
+        if (s->com_initialised) CoUninitialize();
         free(s);
         return 0;
     }
@@ -157,6 +167,7 @@ extern "C" gokd_session_t gokd_create_session(void) {
                                     (void **)&s->client);
     if (FAILED(hr)) {
         fprintf(stderr, "[gokd] DebugCreate failed: 0x%08x\n", (unsigned)hr);
+        if (s->com_initialised) CoUninitialize();
         free(s);
         return 0;
     }
@@ -205,6 +216,7 @@ fail:
     if (s->data_spaces)  s->data_spaces->Release();
     if (s->control)      s->control->Release();
     if (s->client)       s->client->Release();
+    if (s->com_initialised) CoUninitialize();
     free(s);
     return 0;
 }
@@ -230,6 +242,7 @@ extern "C" void gokd_destroy_session(gokd_session_t handle) {
     if (s->control)      s->control->Release();
     if (s->client)       s->client->Release();
 
+    if (s->com_initialised) CoUninitialize();
     memset(s, 0, sizeof(*s));
     free(s);
 }
