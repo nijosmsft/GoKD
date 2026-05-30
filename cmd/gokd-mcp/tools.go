@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +26,27 @@ const (
 	rawOverflowMaxBytes     = 8 * 64 * 1024 // 8 × 64 KiB
 	rawInlineCapBytes       = 16 * 1024     // 16 KiB inline before continuation
 	rawContinuationMaxBytes = 16 * 1024     // 16 KiB per get_raw_output_continuation
+)
+
+// Pagination and size caps applied at the MCP boundary so a single tool
+// call cannot blow up an LLM context. See design doc §5 (t2-4).
+const (
+	defaultModulesLimit = 100
+	maxModulesLimit     = 500
+
+	defaultStackFrames = 32
+	maxStackFrames     = 256
+
+	maxReadMemoryBytes = 4096
+
+	maxDisassembleCount = 1024
+
+	maxTypeFields = 256
+
+	defaultRecentEventsLimit = 32
+	maxRecentEventsLimit     = 32
+	defaultRecentOutputLimit = 64
+	maxRecentOutputLimit     = 256
 )
 
 type srv struct {
@@ -88,8 +111,18 @@ type connectionInput struct {
 	Connection string `json:"connection" jsonschema:"DbgEng remote process-server connection string"`
 }
 
+type getModulesInput struct {
+	NameGlob string `json:"name_glob,omitempty" jsonschema:"optional filepath.Match glob applied to module Name (e.g. 'nt!*' or '*.dll'); empty matches every module"`
+	Offset   int    `json:"offset,omitempty" jsonschema:"0-based index into the filtered set"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"max items to return (default 100, max 500)"`
+}
+
 type modulesOutput struct {
-	Modules []Module `json:"modules"`
+	Modules    []Module `json:"modules"`
+	Total      int      `json:"total"`
+	Returned   int      `json:"returned"`
+	NextOffset int      `json:"next_offset,omitempty"`
+	Truncated  bool     `json:"truncated,omitempty"`
 }
 type threadsOutput struct {
 	Threads []Thread `json:"threads"`
@@ -112,17 +145,25 @@ type setRegisterInput struct {
 	ValueHex string `json:"value_hex" jsonschema:"new register value, parsed with base 0 (for example 0x1234)"`
 }
 
+type getStackInput struct {
+	MaxFrames int `json:"max_frames,omitempty" jsonschema:"max frames to return (default 32, hard cap 256)"`
+}
+
 type stackOutput struct {
-	Frames []Frame `json:"frames"`
+	Frames    []Frame `json:"frames"`
+	Returned  int     `json:"returned"`
+	Truncated bool    `json:"truncated,omitempty"`
 }
 
 type readMemoryInput struct {
 	AddressHex string `json:"address_hex" jsonschema:"virtual address to read, parsed with base 0"`
-	Length     uint64 `json:"length" jsonschema:"number of bytes to read"`
+	Length     uint64 `json:"length" jsonschema:"number of bytes to read (hard cap 4096)"`
 }
 
 type hexOutput struct {
-	Hex string `json:"hex"`
+	Hex       string `json:"hex"`
+	Length    int    `json:"length,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 type writeMemoryInput struct {
@@ -137,16 +178,18 @@ type writeMemoryOutput struct {
 
 type readPhysicalInput struct {
 	AddressHex string `json:"address_hex" jsonschema:"physical address to read, parsed with base 0"`
-	Length     uint64 `json:"length" jsonschema:"number of bytes to read"`
+	Length     uint64 `json:"length" jsonschema:"number of bytes to read (hard cap 4096)"`
 }
 
 type disassembleInput struct {
 	AddressHex string `json:"address_hex" jsonschema:"address to disassemble, parsed with base 0"`
-	Count      int    `json:"count,omitempty" jsonschema:"number of instructions; defaults to 8"`
+	Count      int    `json:"count,omitempty" jsonschema:"number of instructions; defaults to 8, hard cap 1024"`
 }
 
 type disassembleOutput struct {
 	Instructions []Instruction `json:"instructions"`
+	Returned     int           `json:"returned,omitempty"`
+	Truncated    bool          `json:"truncated,omitempty"`
 }
 
 type nameInput struct {
@@ -172,7 +215,9 @@ type typeInput struct {
 }
 
 type fieldsOutput struct {
-	Fields []Field `json:"fields"`
+	Fields    []Field `json:"fields"`
+	Returned  int     `json:"returned,omitempty"`
+	Truncated bool    `json:"truncated,omitempty"`
 }
 type typeSizeOutput struct {
 	Size uint64 `json:"size"`
@@ -222,7 +267,23 @@ type executeRawInput struct {
 }
 
 type executeRawOutput struct {
-	Output string `json:"output"`
+	Output            string `json:"output"`
+	Bytes             int    `json:"bytes,omitempty"`
+	Truncated         bool   `json:"truncated,omitempty"`
+	ContinuationToken string `json:"continuation_token,omitempty"`
+}
+
+type getRawContinuationInput struct {
+	Token  string `json:"token" jsonschema:"continuation_token returned by an earlier execute_raw call"`
+	Offset int    `json:"offset,omitempty" jsonschema:"0-based byte offset into the overflow buffer"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"max bytes to return (default 16384, max 16384)"`
+}
+
+type getRawContinuationOutput struct {
+	Output     string `json:"output"`
+	NextOffset int    `json:"next_offset,omitempty"`
+	Truncated  bool   `json:"truncated,omitempty"`
+	Expired    bool   `json:"expired,omitempty"`
 }
 
 // --- t1-4 symbol reload / status ---
@@ -461,19 +522,19 @@ func registerTools(server *mcp.Server, s *srv) {
 	addToolMaybe(s, server, &mcp.Tool{Name: "detach", Description: "Detach from the current target."}, s.detach)
 	addToolMaybe(s, server, &mcp.Tool{Name: "connect_remote", Description: "Connect to a DbgEng dbgsrv process server."}, s.connectRemote)
 	addToolMaybe(s, server, &mcp.Tool{Name: "disconnect_remote", Description: "Disconnect from the current DbgEng process server."}, s.disconnectRemote)
-	addToolMaybe(s, server, &mcp.Tool{Name: "get_modules", Description: "List all modules loaded in the current target. Returns base address, size, and name for each module."}, s.getModules)
+	addToolMaybe(s, server, &mcp.Tool{Name: "get_modules", Description: "List modules loaded in the current target, optionally filtered by name_glob and paginated via offset/limit. Returns base address, size, and name for each module. Limit defaults to 100 and is capped at 500."}, s.getModules)
 	addToolMaybe(s, server, &mcp.Tool{Name: "get_threads", Description: "List threads in the current target."}, s.getThreads)
 	addToolMaybe(s, server, &mcp.Tool{Name: "set_thread", Description: "Set the current thread by system thread ID."}, s.setThread)
 	addToolMaybe(s, server, &mcp.Tool{Name: "get_registers", Description: "Read registers from the current thread; optionally filter by register name."}, s.getRegisters)
 	addToolMaybe(s, server, &mcp.Tool{Name: "set_register", Description: "Set a register value in the current thread."}, s.setRegister)
-	addToolMaybe(s, server, &mcp.Tool{Name: "get_stack", Description: "Return the current thread stack frames with symbol information."}, s.getStack)
-	addToolMaybe(s, server, &mcp.Tool{Name: "read_memory", Description: "Read virtual memory and return hex-encoded bytes."}, s.readMemory)
+	addToolMaybe(s, server, &mcp.Tool{Name: "get_stack", Description: "Return the current thread stack frames with symbol information. max_frames defaults to 32 and is capped at 256; truncated indicates the unwinder produced more frames than were returned."}, s.getStack)
+	addToolMaybe(s, server, &mcp.Tool{Name: "read_memory", Description: "Read virtual memory and return hex-encoded bytes. Length is hard-capped at 4096 bytes per call; page by issuing follow-up read_memory calls at address+length."}, s.readMemory)
 	addToolMaybe(s, server, &mcp.Tool{Name: "write_memory", Description: "Write hex-encoded bytes to virtual memory."}, s.writeMemory)
-	addToolMaybe(s, server, &mcp.Tool{Name: "read_physical", Description: "Read physical memory and return hex-encoded bytes."}, s.readPhysical)
-	addToolMaybe(s, server, &mcp.Tool{Name: "disassemble", Description: "Disassemble instructions starting at an address."}, s.disassemble)
+	addToolMaybe(s, server, &mcp.Tool{Name: "read_physical", Description: "Read physical memory and return hex-encoded bytes. Length is hard-capped at 4096 bytes per call."}, s.readPhysical)
+	addToolMaybe(s, server, &mcp.Tool{Name: "disassemble", Description: "Disassemble instructions starting at an address. count defaults to 8 and is hard-capped at 1024; truncated indicates the cap was applied."}, s.disassemble)
 	addToolMaybe(s, server, &mcp.Tool{Name: "name_to_addr", Description: "Resolve a symbol name to an address."}, s.nameToAddr)
 	addToolMaybe(s, server, &mcp.Tool{Name: "addr_to_name", Description: "Resolve an address to a symbol name and displacement."}, s.addrToName)
-	addToolMaybe(s, server, &mcp.Tool{Name: "get_type_fields", Description: "List fields for a type using DbgHelp symbol information."}, s.getTypeFields)
+	addToolMaybe(s, server, &mcp.Tool{Name: "get_type_fields", Description: "List fields for a type using DbgHelp symbol information. Hard-capped at 256 fields; truncated indicates the type has more."}, s.getTypeFields)
 	addToolMaybe(s, server, &mcp.Tool{Name: "get_type_size", Description: "Return the size of a type using DbgHelp symbol information."}, s.getTypeSize)
 	addToolMaybe(s, server, &mcp.Tool{Name: "add_breakpoint", Description: "Add a breakpoint by address or symbol expression."}, s.addBreakpoint)
 	addToolMaybe(s, server, &mcp.Tool{Name: "remove_breakpoint", Description: "Remove a breakpoint by ID."}, s.removeBreakpoint)
@@ -492,8 +553,9 @@ func registerTools(server *mcp.Server, s *srv) {
 		execAnnot.DestructiveHint = &dt
 		ow := true
 		execAnnot.OpenWorldHint = &ow
-		mcp.AddTool(server, &mcp.Tool{Name: "execute_raw", Description: "WARNING: arbitrary dbgeng command. Use only when other tools are insufficient.", Annotations: execAnnot}, s.executeRaw)
+		mcp.AddTool(server, &mcp.Tool{Name: "execute_raw", Description: "WARNING: arbitrary dbgeng command. Use only when other tools are insufficient. Output is capped at 16 KiB inline; if the command produced more, the response sets truncated=true and continuation_token, which the caller passes to get_raw_output_continuation to read the rest.", Annotations: execAnnot}, s.executeRaw)
 	}
+	addToolMaybe(s, server, &mcp.Tool{Name: "get_raw_output_continuation", Description: "Fetch the continuation buffer associated with a token returned by execute_raw. offset (default 0) and limit (default 16384, max 16384) control the byte window. Returns expired=true once the LRU has evicted the entry (8 entries / 512 KiB total)."}, s.getRawContinuation)
 
 	// --- t1-4 symbol reload / status ---
 	addToolMaybe(s, server, &mcp.Tool{Name: "reload_symbols", Description: "Force a symbol reload via IDebugSymbols3::ReloadWide. Use when get_modules reports a deferred symbol_type or after changing set_symbol_path. spec is forwarded verbatim ('', '/f', '/f <module>'). May download from the symbol server — supply timeout_seconds (default 0 = no timeout) to bound the wait. Returns ok=true on success."}, s.reloadSymbols)
@@ -620,7 +682,7 @@ func (s *srv) disconnectRemote(ctx context.Context, _ *mcp.CallToolRequest, _ st
 	return nil, okOutput{OK: true}, nil
 }
 
-func (s *srv) getModules(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, modulesOutput, error) {
+func (s *srv) getModules(ctx context.Context, _ *mcp.CallToolRequest, in getModulesInput) (*mcp.CallToolResult, modulesOutput, error) {
 	if err := checkContext(ctx); err != nil {
 		return toolErr[modulesOutput]("get_modules", err)
 	}
@@ -628,11 +690,54 @@ func (s *srv) getModules(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}
 	if err != nil {
 		return toolErr[modulesOutput]("get_modules", err)
 	}
-	out := make([]Module, len(mods))
-	for i, m := range mods {
-		out[i] = formatModule(m)
+	glob := strings.TrimSpace(in.NameGlob)
+	if glob != "" {
+		if _, err := filepath.Match(glob, ""); err != nil {
+			return toolErr[modulesOutput]("get_modules",
+				fmt.Errorf("invalid name_glob %q: %w", glob, err))
+		}
 	}
-	return nil, modulesOutput{Modules: out}, nil
+	filtered := make([]Module, 0, len(mods))
+	for _, m := range mods {
+		formatted := formatModule(m)
+		if glob != "" {
+			match, _ := filepath.Match(glob, formatted.Name)
+			if !match {
+				continue
+			}
+		}
+		filtered = append(filtered, formatted)
+	}
+	total := len(filtered)
+	limit := in.Limit
+	if limit <= 0 {
+		limit = defaultModulesLimit
+	}
+	if limit > maxModulesLimit {
+		limit = maxModulesLimit
+	}
+	offset := in.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	page := filtered[offset:end]
+	out := modulesOutput{
+		Modules:  page,
+		Total:    total,
+		Returned: len(page),
+	}
+	if end < total {
+		out.NextOffset = end
+		out.Truncated = true
+	}
+	return nil, out, nil
 }
 
 func (s *srv) getThreads(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, threadsOutput, error) {
@@ -703,7 +808,7 @@ func (s *srv) setRegister(ctx context.Context, _ *mcp.CallToolRequest, in setReg
 	return nil, okOutput{OK: true}, nil
 }
 
-func (s *srv) getStack(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, stackOutput, error) {
+func (s *srv) getStack(ctx context.Context, _ *mcp.CallToolRequest, in getStackInput) (*mcp.CallToolResult, stackOutput, error) {
 	if err := checkContext(ctx); err != nil {
 		return toolErr[stackOutput]("get_stack", err)
 	}
@@ -711,11 +816,23 @@ func (s *srv) getStack(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) 
 	if err != nil {
 		return toolErr[stackOutput]("get_stack", err)
 	}
+	limit := in.MaxFrames
+	if limit <= 0 {
+		limit = defaultStackFrames
+	}
+	if limit > maxStackFrames {
+		limit = maxStackFrames
+	}
+	truncated := false
+	if len(frames) > limit {
+		frames = frames[:limit]
+		truncated = true
+	}
 	out := make([]Frame, len(frames))
 	for i, f := range frames {
 		out[i] = formatFrame(f)
 	}
-	return nil, stackOutput{Frames: out}, nil
+	return nil, stackOutput{Frames: out, Returned: len(out), Truncated: truncated}, nil
 }
 
 func (s *srv) readMemory(ctx context.Context, _ *mcp.CallToolRequest, in readMemoryInput) (*mcp.CallToolResult, hexOutput, error) {
@@ -726,11 +843,17 @@ func (s *srv) readMemory(ctx context.Context, _ *mcp.CallToolRequest, in readMem
 	if err != nil {
 		return toolErr[hexOutput]("read_memory", err)
 	}
-	data, err := s.sess.ReadMemory(addr, in.Length)
+	length := in.Length
+	truncated := false
+	if length > maxReadMemoryBytes {
+		length = maxReadMemoryBytes
+		truncated = true
+	}
+	data, err := s.sess.ReadMemory(addr, length)
 	if err != nil {
 		return toolErr[hexOutput]("read_memory", err)
 	}
-	return nil, hexOutput{Hex: hex.EncodeToString(data)}, nil
+	return nil, hexOutput{Hex: hex.EncodeToString(data), Length: len(data), Truncated: truncated}, nil
 }
 
 func (s *srv) writeMemory(ctx context.Context, _ *mcp.CallToolRequest, in writeMemoryInput) (*mcp.CallToolResult, writeMemoryOutput, error) {
@@ -759,11 +882,17 @@ func (s *srv) readPhysical(ctx context.Context, _ *mcp.CallToolRequest, in readP
 	if err != nil {
 		return toolErr[hexOutput]("read_physical", err)
 	}
-	data, err := s.sess.ReadPhysical(addr, in.Length)
+	length := in.Length
+	truncated := false
+	if length > maxReadMemoryBytes {
+		length = maxReadMemoryBytes
+		truncated = true
+	}
+	data, err := s.sess.ReadPhysical(addr, length)
 	if err != nil {
 		return toolErr[hexOutput]("read_physical", err)
 	}
-	return nil, hexOutput{Hex: hex.EncodeToString(data)}, nil
+	return nil, hexOutput{Hex: hex.EncodeToString(data), Length: len(data), Truncated: truncated}, nil
 }
 
 func (s *srv) disassemble(ctx context.Context, _ *mcp.CallToolRequest, in disassembleInput) (*mcp.CallToolResult, disassembleOutput, error) {
@@ -781,6 +910,10 @@ func (s *srv) disassemble(ctx context.Context, _ *mcp.CallToolRequest, in disass
 	if count < 0 {
 		return toolErr[disassembleOutput]("disassemble", fmt.Errorf("count must be >= 0"))
 	}
+	requested := count
+	if count > maxDisassembleCount {
+		count = maxDisassembleCount
+	}
 	ins, err := s.sess.DisassembleRange(addr, count)
 	if err != nil {
 		return toolErr[disassembleOutput]("disassemble", err)
@@ -789,7 +922,11 @@ func (s *srv) disassemble(ctx context.Context, _ *mcp.CallToolRequest, in disass
 	for i, inst := range ins {
 		out[i] = formatInstruction(inst)
 	}
-	return nil, disassembleOutput{Instructions: out}, nil
+	return nil, disassembleOutput{
+		Instructions: out,
+		Returned:     len(out),
+		Truncated:    requested > maxDisassembleCount,
+	}, nil
 }
 
 func (s *srv) nameToAddr(ctx context.Context, _ *mcp.CallToolRequest, in nameInput) (*mcp.CallToolResult, nameToAddrOutput, error) {
@@ -826,11 +963,16 @@ func (s *srv) getTypeFields(ctx context.Context, _ *mcp.CallToolRequest, in type
 	if err != nil {
 		return toolErr[fieldsOutput]("get_type_fields", err)
 	}
+	truncated := false
+	if len(fields) > maxTypeFields {
+		fields = fields[:maxTypeFields]
+		truncated = true
+	}
 	out := make([]Field, len(fields))
 	for i, f := range fields {
 		out[i] = formatField(f)
 	}
-	return nil, fieldsOutput{Fields: out}, nil
+	return nil, fieldsOutput{Fields: out, Returned: len(out), Truncated: truncated}, nil
 }
 
 func (s *srv) getTypeSize(ctx context.Context, _ *mcp.CallToolRequest, in typeInput) (*mcp.CallToolResult, typeSizeOutput, error) {
@@ -986,7 +1128,80 @@ func (s *srv) executeRaw(ctx context.Context, _ *mcp.CallToolRequest, in execute
 	if err != nil {
 		return toolErr[executeRawOutput]("execute_raw", err)
 	}
-	return nil, executeRawOutput{Output: out}, nil
+	return nil, s.packExecuteRawOutput(out), nil
+}
+
+// packExecuteRawOutput splits a possibly oversized command output into an
+// inline 16 KiB head plus an LRU-stored continuation tail; the caller pulls
+// the tail via get_raw_output_continuation.
+func (s *srv) packExecuteRawOutput(out string) executeRawOutput {
+	resp := executeRawOutput{Bytes: len(out)}
+	if len(out) <= rawInlineCapBytes {
+		resp.Output = out
+		return resp
+	}
+	resp.Output = out[:rawInlineCapBytes]
+	resp.Truncated = true
+	if s.rawOverflow == nil {
+		// No backing store -- still surface the truncation flag so the
+		// caller knows bytes were dropped.
+		return resp
+	}
+	tail := []byte(out[rawInlineCapBytes:])
+	token, err := newContinuationToken()
+	if err != nil {
+		return resp
+	}
+	s.rawOverflow.Put(token, tail)
+	resp.ContinuationToken = token
+	return resp
+}
+
+func newContinuationToken() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+func (s *srv) getRawContinuation(ctx context.Context, _ *mcp.CallToolRequest, in getRawContinuationInput) (*mcp.CallToolResult, getRawContinuationOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[getRawContinuationOutput]("get_raw_output_continuation", err)
+	}
+	if strings.TrimSpace(in.Token) == "" {
+		return toolErr[getRawContinuationOutput]("get_raw_output_continuation",
+			fmt.Errorf("token is required"))
+	}
+	if s.rawOverflow == nil {
+		return nil, getRawContinuationOutput{Expired: true}, nil
+	}
+	data, ok := s.rawOverflow.Get(in.Token)
+	if !ok {
+		return nil, getRawContinuationOutput{Expired: true}, nil
+	}
+	offset := in.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(data) {
+		offset = len(data)
+	}
+	limit := in.Limit
+	if limit <= 0 || limit > rawContinuationMaxBytes {
+		limit = rawContinuationMaxBytes
+	}
+	end := offset + limit
+	if end > len(data) {
+		end = len(data)
+	}
+	chunk := data[offset:end]
+	out := getRawContinuationOutput{Output: string(chunk)}
+	if end < len(data) {
+		out.NextOffset = end
+		out.Truncated = true
+	}
+	return nil, out, nil
 }
 
 // --- t1-4 symbol reload / status ---
