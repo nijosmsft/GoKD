@@ -80,14 +80,21 @@ var commands = map[string]commandSpec{
 		Long: "Resolve a symbol name to its virtual address.", Examples: []string{"n2a kernel32!CreateFileW"}},
 	"a2n": {Fn: cmdA2N, Short: "Resolve address to nearest symbol",
 		Long: "Resolve an address to the nearest symbol plus displacement.", Examples: []string{"a2n 0x7ff800001234"}},
-	"help": {Fn: cmdHelp, Short: "Show help",
-		Long:     "With no arguments, list all commands. With a command name, show its details and examples.",
-		Examples: []string{"help", "help bp"}},
-	"?":    {Fn: cmdHelp, Short: "Alias for help"},
-	"h":    {Fn: cmdHelp, Short: "Alias for help"},
 	"q":    {Fn: cmdQuit, Short: "Quit the debugger"},
 	"quit": {Fn: cmdQuit, Short: "Quit the debugger"},
 	"exit": {Fn: cmdQuit, Short: "Quit the debugger"},
+}
+
+func init() {
+	helpSpec := commandSpec{
+		Fn:       cmdHelp,
+		Short:    "Show help",
+		Long:     "With no arguments, list all commands. With a command name, show its details and examples.",
+		Examples: []string{"help", "help bp"},
+	}
+	commands["help"] = helpSpec
+	commands["?"] = commandSpec{Fn: cmdHelp, Short: "Alias for help"}
+	commands["h"] = commandSpec{Fn: cmdHelp, Short: "Alias for help"}
 }
 
 // quitNames lists command names that close the session; these are not stored

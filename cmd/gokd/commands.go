@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"text/tabwriter"

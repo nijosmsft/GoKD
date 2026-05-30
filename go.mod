@@ -3,12 +3,12 @@ module github.com/nijosmsft/gokd
 go 1.25.6
 
 require (
+	github.com/chzyer/readline v1.5.1
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/nijosmsft/lablink v0.1.5-0.20260530174237-501dbe6af30a
 )
 
 require (
-	github.com/chzyer/readline v1.5.1 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
