@@ -1,0 +1,48 @@
+GoKD — Windows release bundle
+=============================
+
+This zip contains:
+
+  gokd.exe                  Interactive debugger / CLI
+  gokd-mcp.exe              MCP server exposing gokd as tools
+  libstdc++-6.dll           MinGW C++ runtime
+  libgcc_s_seh-1.dll        MinGW C runtime support
+  libwinpthread-1.dll       MinGW pthreads
+  README.md                 Project overview and usage
+  LICENSE                   MIT license
+  INSTALL.txt               This file
+
+
+Required dependency: Windows SDK Debugging Tools
+------------------------------------------------
+
+GoKD links against `dbgeng.dll` at runtime. This DLL ships with the
+"Debugging Tools for Windows" component of the Windows 10/11 SDK and is
+NOT redistributed in this bundle (the Windows SDK EULA covers its
+redistribution terms separately).
+
+Install the SDK Debugging Tools from:
+
+  https://learn.microsoft.com/windows-hardware/drivers/debugger/
+
+The default install path is:
+
+  C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\dbgeng.dll
+
+GoKD will auto-discover that path. If you install the SDK elsewhere,
+set the environment variable:
+
+  set GOKD_DBGENG_PATH=C:\path\to\dbgeng.dll
+
+NOTE: the system `dbgeng.dll` in `C:\Windows\System32` lacks the KDNET
+transport DLLs, so kernel debugging only works against the SDK copy.
+
+
+Quick start
+-----------
+
+  gokd.exe -attach <pid>
+  gokd-mcp.exe -attach <pid>          # for use with an MCP client
+
+See README.md for full setup, MCP client configuration, and transport
+mode documentation.
