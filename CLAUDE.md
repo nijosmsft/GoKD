@@ -7,7 +7,7 @@ Guidance for Claude Code when working in this repository.
 **GoKD** — Go library for Windows kernel- and user-mode debugging, built on the Windows
 DbgEng engine (`dbgeng.dll`). Same engine that powers `kd.exe`, `cdb.exe`, `windbg.exe`.
 
-Module path: `github.com/nijosmsft/gokd` (Go 1.22). MIT licensed. Single-process, no IPC —
+Module path: `github.com/nijosmsft/gokd` (Go 1.25). MIT licensed. Single-process, no IPC —
 the C++ shim is statically linked into the Go binary via CGo.
 
 `PLAN.md` is the original design document; `README.md` is a stub. **PLAN.md is aspirational
@@ -59,7 +59,7 @@ gokd.go                       Public Session interface + impl (top-level package
 gokd_test.go                  User-mode tests (attaches to notepad.exe)
 gokd_kernel_test.go           Live KDNET kernel attach test
 gokd_diag_test.go             CreateProcess diagnostics
-go.mod                        Module: github.com/nijosmsft/gokd, go 1.22
+go.mod                        Module: github.com/nijosmsft/gokd, go 1.25
 
 internal/dbgcgo/
   dbgeng.go                   CGo wrappers + dispatch goroutine + Session struct
@@ -82,6 +82,12 @@ cmd/gokd/                     Reference interactive debugger (REPL); stdlib-only
   commands.go                 Command handlers (bp, g, k, r, lm, dt, u, ...)
   format.go                   Hexdump, stack and register formatting
   parse.go                    parseAddr (hex/sym/0x/0d), parseCount (L-prefix)
+
+cmd/gokd-mcp/                 MCP server exposing gokd.Session tools over stdio
+  main.go                     Flag parsing, session setup, MCP server startup
+  tools.go                    MCP tool schemas and handlers
+  format.go                   Public API type → JSON-safe MCP output conversion
+  smoke_test.go               Manual MCP list-tools smoke test (`-tags manual`)
 
 PLAN.md, README.md, LICENSE
 ```
@@ -164,10 +170,12 @@ indicate working:
   type info (via DbgHelp), breakpoints, disassembly
 - Async event + output channels delivered from CGo callbacks
 - Context-based cancellation for `Go/StepIn/StepOver/StepOut` and `AttachKernel`
+- MCP server at `cmd/gokd-mcp/` exposing the public `gokd.Session` API as stdio tools
 
 `PLAN.md` Phases 1–4c are largely implemented in the flat layout. The interactive
 CLI/REPL lives at `cmd/gokd/` (build: `go build -o bin/gokd.exe ./cmd/gokd`).
-Phase 5 (`gokd-mcp` separate repo) is not yet present.
+Phase 5 lives in this repo at `cmd/gokd-mcp/` (build:
+`go build -o bin/gokd-mcp.exe ./cmd/gokd-mcp`).
 
 ## Conventions
 

@@ -28,7 +28,7 @@ async event + output channels, `context.Context`-based cancellation.
 | Requirement | Notes |
 |---|---|
 | Windows 10/11 x64 | Build host and debug target |
-| Go 1.22+ | `go.mod` minimum |
+| Go 1.25+ | `go.mod` minimum; required by the MCP SDK |
 | MSYS2 + MinGW-w64 | CGo on Windows needs a GCC toolchain |
 | Windows SDK Debugging Tools | Provides `dbgeng.dll` with KDNET transports |
 | `_NT_SYMBOL_PATH` (optional) | e.g. `srv*C:\symbols*https://msdl.microsoft.com/download/symbols` |
@@ -148,6 +148,36 @@ Commands:
 ```
 
 `Ctrl+C` during execution issues a break-in; press it twice within two seconds to exit.
+
+## MCP server
+
+GoKD also ships a stateful MCP server at `cmd/gokd-mcp/`. It exposes the public
+`gokd.Session` API as tools over stdio, so an MCP host can attach/open a target and then
+inspect modules, threads, registers, stack frames, memory, symbols, types, breakpoints,
+execution control, and raw DbgEng commands.
+
+Build it from the MSYS2 MinGW64 shell the same way as the CLI:
+
+```bash
+unset WINDBG_SDK WINDOWS_SDK_INCLUDE
+go build -o bin/gokd-mcp.exe ./cmd/gokd-mcp
+```
+
+Example MCP configuration for Claude Desktop or Copilot CLI:
+
+```json
+{
+  "mcpServers": {
+    "gokd": {
+      "command": "C:\\git\\gokd\\bin\\gokd-mcp.exe",
+      "args": ["-symbols", "srv*C:\\symbols*https://msdl.microsoft.com/download/symbols"]
+    }
+  }
+}
+```
+
+The server uses stdout for JSON-RPC only. Engine output and optional MCP logging go to
+stderr, or to the path passed with `-log`.
 
 ## Running tests
 
