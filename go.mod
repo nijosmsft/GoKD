@@ -4,7 +4,7 @@ go 1.25.6
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.6.1
-	github.com/nijosmsft/lablink v0.0.0-00010101000000-000000000000
+	github.com/nijosmsft/lablink v0.1.5-0.20260530174237-501dbe6af30a
 )
 
 require (
@@ -20,5 +20,3 @@ require (
 	google.golang.org/grpc v1.80.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
-
-replace github.com/nijosmsft/lablink => ../lablink

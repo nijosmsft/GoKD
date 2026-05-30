@@ -198,18 +198,9 @@ Phase 5 lives in this repo at `cmd/gokd-mcp/` (build:
    - Byte-shuttles local stdin↔stream↔stdout. Copilot sees a normal stdio MCP
      server; the engine runs on the node.
 
-Implementation lives in `cmd/gokd-mcp/proxy.go`. The lablink dependency uses a
-`replace` directive in `go.mod` pointing at `../lablink` for local
-development. Because lablink hasn't shipped a tagged release yet, the proxy
-code is gated behind a `//go:build remote` tag — default builds get a stub
-(`proxy_stub.go`) that returns an error if `-remote` is passed. To enable
-the real proxy, build with:
-
-```
-go build -tags remote ./cmd/gokd-mcp
-```
-
-(and ensure `..\lablink` is checked out alongside `..\gokd`).
+Implementation lives in `cmd/gokd-mcp/proxy.go`. The lablink dependency is
+a normal pseudo-version pin in `go.mod`; no replace directive, no build
+tag — `-remote` is part of every build.
 
 ### When to pick which mode
 

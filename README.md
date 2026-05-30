@@ -234,11 +234,6 @@ language). `cmd/gokd-mcp/listen_test.go` has a complete worked example
 
 #### `-remote NODE` mode
 
-> **Note**: `-remote` requires building with `go build -tags remote ./cmd/gokd-mcp`
-> and having `github.com/nijosmsft/lablink` checked out at `..\lablink` next to
-> the gokd repo (see `go.mod`'s `replace` directive). Default builds get a stub
-> that errors out cleanly if `-remote` is passed.
-
 Spawns no DbgEng locally. Instead:
 
 1. Resolves `NODE` against the same `~/.lablink/nodes.json` registry that

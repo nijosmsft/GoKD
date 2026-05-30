@@ -1,4 +1,4 @@
-//go:build manual && remote
+//go:build manual
 
 // smoke_remote.go: end-to-end smoke test for `gokd-mcp -remote NODE`.
 // Spawns gokd-mcp.exe -remote <NODE>, runs `initialize` + `tools/list`,
@@ -7,8 +7,8 @@
 //
 // Usage:
 //
-//	go run -tags manual,remote scripts/smoke_remote.go RR1N4406-25
-//	go run -tags manual,remote scripts/smoke_remote.go RR1N4406-25 13612
+//	go run -tags manual scripts/smoke_remote.go RR1N4406-25
+//	go run -tags manual scripts/smoke_remote.go RR1N4406-25 13612
 //
 // Requires the same lablink env vars that LabLinkServer uses (token file,
 // TLS material). Inherits parent env.
