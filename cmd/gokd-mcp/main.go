@@ -66,14 +66,16 @@ func main() {
 		_ = sess.Close()
 	}()
 
-	startAsyncDrainers(sess, engineLog)
+	state := newSrv(sess, cfg.readonly, cfg.unsafeRaw)
+	drain := newDrainer(state, engineLog)
+	drain.run(sess)
 
 	makeServer := func() *mcp.Server {
 		s := mcp.NewServer(&mcp.Implementation{Name: "gokd-mcp", Version: "0.1.0"}, &mcp.ServerOptions{
 			Instructions: "Stateful MCP server for Windows DbgEng debugging through GoKD. Attach or open a target before inspection tools.",
 			Logger:       slog.New(slog.NewTextHandler(logWriter, nil)),
 		})
-		registerTools(s, &srv{sess: sess, readonly: cfg.readonly, unsafeRaw: cfg.unsafeRaw})
+		registerTools(s, state)
 		return s
 	}
 
@@ -151,57 +153,4 @@ func setupLogWriter(path string) (io.Writer, func(), error) {
 		return nil, nil, err
 	}
 	return io.MultiWriter(os.Stderr, f), func() { _ = f.Close() }, nil
-}
-
-func startAsyncDrainers(sess gokd.Session, logger *log.Logger) {
-	go func() {
-		for out := range sess.Output() {
-			logger.Print(out)
-		}
-	}()
-	go func() {
-		for ev := range sess.Events() {
-			logger.Printf("[event] %s", formatEvent(ev))
-		}
-	}()
-}
-
-func formatEvent(ev gokd.Event) string {
-	switch e := ev.(type) {
-	case gokd.BreakpointEvent:
-		return fmt.Sprintf("breakpoint %d at %s thread=%d", e.ID, hex64(e.Address), eventThreadID(e.Thread))
-	case gokd.ExceptionEvent:
-		chance := "second"
-		if e.FirstChance {
-			chance = "first"
-		}
-		return fmt.Sprintf("exception 0x%08x at %s %s-chance thread=%d", e.Code, hex64(e.Address), chance, eventThreadID(e.Thread))
-	case gokd.ProcessCreatedEvent:
-		return fmt.Sprintf("process created %s base=%s size=0x%x", e.ImageName, hex64(e.BaseOffset), e.ModuleSize)
-	case gokd.ProcessExitedEvent:
-		return fmt.Sprintf("process exited code=%d", e.ExitCode)
-	case gokd.ModuleLoadedEvent:
-		if e.Module == nil {
-			return "module loaded"
-		}
-		return fmt.Sprintf("module loaded %s base=%s size=0x%x", e.Module.Name, hex64(e.Module.Base), e.Module.Size)
-	case gokd.ModuleUnloadedEvent:
-		return fmt.Sprintf("module unloaded %s base=%s", e.ImageBaseName, hex64(e.BaseOffset))
-	case gokd.ThreadCreatedEvent:
-		if e.Thread == nil {
-			return "thread created"
-		}
-		return fmt.Sprintf("thread created sysid=%d start=%s", e.Thread.SystemID, hex64(e.Thread.StartOffset))
-	case gokd.ThreadExitedEvent:
-		return fmt.Sprintf("thread exited sysid=%d code=%d", e.SystemID, e.ExitCode)
-	default:
-		return fmt.Sprintf("%T", ev)
-	}
-}
-
-func eventThreadID(t *gokd.Thread) uint32 {
-	if t == nil {
-		return 0
-	}
-	return t.SystemID
 }

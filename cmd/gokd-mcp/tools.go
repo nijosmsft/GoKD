@@ -13,10 +13,52 @@ import (
 	"github.com/nijosmsft/gokd"
 )
 
+// ring buffer capacities for events / output / raw-output continuation.
+// These are intentionally small: ring buffers are the pull fallback for
+// notification-aware clients; bulky output (target stdout) gets coalesced
+// upstream by the drainer.
+const (
+	eventRingCap            = 32
+	outputRingCap           = 256
+	rawOverflowEntries      = 8
+	rawOverflowMaxBytes     = 8 * 64 * 1024 // 8 × 64 KiB
+	rawInlineCapBytes       = 16 * 1024     // 16 KiB inline before continuation
+	rawContinuationMaxBytes = 16 * 1024     // 16 KiB per get_raw_output_continuation
+)
+
 type srv struct {
 	sess      gokd.Session
 	readonly  bool
 	unsafeRaw bool
+
+	// Ring buffers populated by the drainer; queried by get_recent_events
+	// and get_recent_output for clients without notification subscriptions.
+	eventRing  *ring[ringEvent]
+	outputRing *ring[ringOutput]
+
+	// rawOverflow stores bytes spilled past the inline cap from execute_raw,
+	// keyed by continuation_token UUID. LRU evicts the oldest entry under
+	// pressure.
+	rawOverflow *lruCache
+
+	// Last known target lifecycle marker, kept up to date by the drainer
+	// as events flow through pushEvent.
+	status *sessionStatus
+}
+
+// newSrv constructs an srv with all Tier 2 plumbing wired up. Tests that
+// only need the read paths can construct &srv{sess: ...} directly; this
+// helper exists so production code in main.go has a single call site.
+func newSrv(sess gokd.Session, readonly, unsafeRaw bool) *srv {
+	return &srv{
+		sess:        sess,
+		readonly:    readonly,
+		unsafeRaw:   unsafeRaw,
+		eventRing:   newRing[ringEvent](eventRingCap),
+		outputRing:  newRing[ringOutput](outputRingCap),
+		rawOverflow: newLRUCache(rawOverflowEntries, rawOverflowMaxBytes),
+		status:      &sessionStatus{},
+	}
 }
 
 type okOutput struct {
