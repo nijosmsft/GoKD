@@ -1205,3 +1205,97 @@ func (s *Session) Execute(cmd string) (string, error) {
 	text := C.GoString((*C.char)(unsafe.Pointer(&buf[0])))
 	return text, hresult(hr)
 }
+
+// ── Last event / bugcheck (t1-8) ──────────────────────────────────────
+
+// ExceptionMaxParameters is the Windows EXCEPTION_MAXIMUM_PARAMETERS
+// constant — the number of slots in EXCEPTION_RECORD64.ExceptionInformation.
+const ExceptionMaxParameters = 15
+
+// LastException mirrors gokd_exception_t. ProcessID and ThreadID come
+// from GetLastEventInformationWide, not the EXCEPTION_RECORD itself.
+type LastException struct {
+	Code           uint32
+	Flags          uint32
+	Address        uint64
+	NestedRecord   uint64
+	ParameterCount uint32
+	Parameters     [ExceptionMaxParameters]uint64
+	FirstChance    bool
+	ProcessID      uint32
+	ThreadID       uint32
+	Description    string
+}
+
+// BugCheck mirrors gokd_bugcheck_t.
+type BugCheck struct {
+	Code uint32
+	Args [4]uint64
+}
+
+// GetLastException returns the most recent DEBUG_EVENT_EXCEPTION event
+// surfaced by DbgEng. Returns (nil, ErrNotFound) if the last event was
+// not an exception (e.g. breakpoint, create-process, exit).
+func (s *Session) GetLastException() (*LastException, error) {
+	var cex C.gokd_exception_t
+	var need C.uint32_t
+	var hr C.int32_t
+	s.exec(func() {
+		hr = C.gokd_get_last_exception(s.handle, &cex, nil, 0, &need)
+	})
+	if err := hresult(hr); err != nil {
+		return nil, err
+	}
+	var desc string
+	if need > 1 {
+		buf := make([]byte, int(need))
+		s.exec(func() {
+			hr = C.gokd_get_last_exception(s.handle, &cex,
+				(*C.char)(unsafe.Pointer(&buf[0])),
+				C.uint32_t(len(buf)), &need)
+		})
+		if err := hresult(hr); err != nil {
+			return nil, err
+		}
+		if n := len(buf); n > 0 && buf[n-1] == 0 {
+			buf = buf[:n-1]
+		}
+		desc = string(buf)
+	}
+	out := &LastException{
+		Code:           uint32(cex.code),
+		Flags:          uint32(cex.flags),
+		Address:        uint64(cex.address),
+		NestedRecord:   uint64(cex.nested_record),
+		ParameterCount: uint32(cex.parameter_count),
+		FirstChance:    cex.first_chance != 0,
+		ProcessID:      uint32(cex.process_id),
+		ThreadID:       uint32(cex.thread_id),
+		Description:    desc,
+	}
+	for i := 0; i < ExceptionMaxParameters; i++ {
+		out.Parameters[i] = uint64(cex.parameters[i])
+	}
+	return out, nil
+}
+
+// GetBugCheck returns the kernel bugcheck record. Returns ErrNotFound
+// in user-mode sessions or kernel sessions without a recorded bugcheck.
+func (s *Session) GetBugCheck() (*BugCheck, error) {
+	var cbc C.gokd_bugcheck_t
+	var hr C.int32_t
+	s.exec(func() {
+		hr = C.gokd_get_bugcheck(s.handle, &cbc)
+	})
+	if hr != 0 {
+		// Any failure from ReadBugCheckData is treated as "no bugcheck
+		// recorded" so callers don't need to distinguish E_UNEXPECTED
+		// from E_FAIL from "wrong session kind".
+		return nil, ErrNotFound
+	}
+	out := &BugCheck{Code: uint32(cbc.code)}
+	for i := 0; i < 4; i++ {
+		out.Args[i] = uint64(cbc.args[i])
+	}
+	return out, nil
+}

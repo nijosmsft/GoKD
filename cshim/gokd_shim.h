@@ -689,6 +689,53 @@ int32_t gokd_get_expression_syntax(gokd_session_t s, uint32_t *out_index);
 int32_t gokd_set_expression_syntax(gokd_session_t s, const char *name_utf8);
 
 /* ====================================================================== */
+/*  Last event / bugcheck (t1-8)                                          */
+/* ====================================================================== */
+
+/* Maximum exception parameters surfaced by EXCEPTION_RECORD64. The
+ * Windows constant is EXCEPTION_MAXIMUM_PARAMETERS = 15. */
+#define GOKD_EXCEPTION_MAX_PARAMETERS 15
+
+typedef struct {
+    uint32_t code;
+    uint32_t flags;
+    uint64_t address;
+    uint64_t nested_record;   /* pointer to nested EXCEPTION_RECORD64; 0 if none */
+    uint32_t parameter_count; /* 0..15 */
+    uint64_t parameters[GOKD_EXCEPTION_MAX_PARAMETERS];
+    uint32_t first_chance;    /* 0 = second-chance, 1 = first-chance */
+    uint32_t process_id;
+    uint32_t thread_id;
+    /* description follows via count-then-fetch in desc_buf */
+} gokd_exception_t;
+
+/*
+ * Return the structured "last event" record from DbgEng's
+ * GetLastEventInformationWide. Only DEBUG_EVENT_EXCEPTION events are
+ * surfaced as structured data — other types (breakpoint, create-process,
+ * exit, etc.) return GOKD_E_NOTFOUND (0x80000002). desc_buf may be NULL
+ * to query the required UTF-8 byte length (including NUL) via
+ * *desc_needed.
+ */
+int32_t gokd_get_last_exception(gokd_session_t s,
+                                 gokd_exception_t *out,
+                                 char *desc_buf, uint32_t desc_cap,
+                                 uint32_t *desc_needed);
+
+typedef struct {
+    uint32_t code;
+    uint64_t args[4];
+} gokd_bugcheck_t;
+
+/*
+ * Read the kernel bugcheck record via IDebugControl4::ReadBugCheckData.
+ * Kernel-mode sessions only. User-mode targets, and kernel sessions
+ * without a recorded bugcheck, return a non-success HRESULT — the Go
+ * layer maps these to ErrNotFound.
+ */
+int32_t gokd_get_bugcheck(gokd_session_t s, gokd_bugcheck_t *out);
+
+/* ====================================================================== */
 /*  Callbacks                                                             */
 /* ====================================================================== */
 

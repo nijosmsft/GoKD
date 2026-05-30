@@ -1688,6 +1688,88 @@ extern "C" int32_t gokd_set_expression_syntax(gokd_session_t handle,
 }
 
 /* ====================================================================== */
+/*  Last event / bugcheck (t1-8)                                          */
+/* ====================================================================== */
+
+#ifndef GOKD_E_NOTFOUND
+#define GOKD_E_NOTFOUND ((int32_t)0x80000002)
+#endif
+
+extern "C" int32_t gokd_get_last_exception(gokd_session_t handle,
+                                            gokd_exception_t *out,
+                                            char *desc_buf, uint32_t desc_cap,
+                                            uint32_t *desc_needed) {
+    S;
+    if (!out) return E_INVALIDARG;
+
+    ULONG type = 0, pid = 0, tid = 0;
+    DEBUG_LAST_EVENT_INFO_EXCEPTION extra;
+    memset(&extra, 0, sizeof(extra));
+    ULONG extraUsed = 0;
+    wchar_t desc[1024] = {};
+    ULONG descUsed = 0;
+
+    HRESULT hr = s->control->GetLastEventInformationWide(
+        &type, &pid, &tid,
+        &extra, sizeof(extra), &extraUsed,
+        desc, sizeof(desc) / sizeof(desc[0]), &descUsed);
+    if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
+
+    if (type != DEBUG_EVENT_EXCEPTION) {
+        SET_LAST_ERROR(GOKD_E_NOTFOUND);
+        return GOKD_E_NOTFOUND;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->code           = extra.ExceptionRecord.ExceptionCode;
+    out->flags          = extra.ExceptionRecord.ExceptionFlags;
+    out->address        = extra.ExceptionRecord.ExceptionAddress;
+    out->nested_record  = extra.ExceptionRecord.ExceptionRecord;
+    out->first_chance   = extra.FirstChance;
+    out->process_id     = pid;
+    out->thread_id      = tid;
+
+    ULONG np = extra.ExceptionRecord.NumberParameters;
+    if (np > GOKD_EXCEPTION_MAX_PARAMETERS) np = GOKD_EXCEPTION_MAX_PARAMETERS;
+    out->parameter_count = np;
+    for (ULONG i = 0; i < np; ++i) {
+        out->parameters[i] = extra.ExceptionRecord.ExceptionInformation[i];
+    }
+
+    /* Convert description (wide) -> UTF-8. */
+    int u8len = WideCharToMultiByte(CP_UTF8, 0, desc, -1, NULL, 0, NULL, NULL);
+    if (u8len <= 0) u8len = 1;
+    if (desc_needed) *desc_needed = (uint32_t)u8len;
+    if (desc_buf) {
+        if ((uint32_t)u8len > desc_cap) {
+            return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+        }
+        WideCharToMultiByte(CP_UTF8, 0, desc, -1, desc_buf, (int)desc_cap,
+                             NULL, NULL);
+    }
+    return S_OK;
+}
+
+extern "C" int32_t gokd_get_bugcheck(gokd_session_t handle,
+                                      gokd_bugcheck_t *out) {
+    S;
+    if (!out) return E_INVALIDARG;
+    memset(out, 0, sizeof(*out));
+
+    ULONG code = 0;
+    ULONG64 a1 = 0, a2 = 0, a3 = 0, a4 = 0;
+    HRESULT hr = s->control->ReadBugCheckData(&code, &a1, &a2, &a3, &a4);
+    if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
+
+    out->code = code;
+    out->args[0] = a1;
+    out->args[1] = a2;
+    out->args[2] = a3;
+    out->args[3] = a4;
+    return S_OK;
+}
+
+/* ====================================================================== */
 /*  Callbacks                                                             */
 /* ====================================================================== */
 

@@ -317,6 +317,32 @@ type writeDumpInput struct {
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty" jsonschema:"timeout in seconds; 0 means no timeout. Default 600 if omitted."`
 }
 
+// --- t1-8 last event / bugcheck ---
+
+type lastExceptionOutput struct {
+	Found           bool     `json:"found"`
+	Code            uint32   `json:"code,omitempty"`
+	CodeHex         string   `json:"code_hex,omitempty"`
+	Flags           uint32   `json:"flags,omitempty"`
+	AddressHex      string   `json:"address_hex,omitempty"`
+	NestedRecordHex string   `json:"nested_record_hex,omitempty"`
+	ParameterCount  uint32   `json:"parameter_count,omitempty"`
+	Parameters      []string `json:"parameters,omitempty"`
+	FirstChance     bool     `json:"first_chance,omitempty"`
+	ProcessID       uint32   `json:"process_id,omitempty"`
+	ThreadID        uint32   `json:"thread_id,omitempty"`
+	Description     string   `json:"description,omitempty"`
+}
+
+type bugCheckOutput struct {
+	Found       bool     `json:"found"`
+	Code        uint32   `json:"code,omitempty"`
+	CodeHex     string   `json:"code_hex,omitempty"`
+	Args        []string `json:"args,omitempty"`
+	Name        string   `json:"name,omitempty"`
+	Description string   `json:"description,omitempty"`
+}
+
 func toolErr[Out any](err error) (*mcp.CallToolResult, Out, error) {
 	var zero Out
 	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, zero, nil
@@ -405,6 +431,10 @@ func registerTools(server *mcp.Server, s *srv) {
 	mcp.AddTool(server, &mcp.Tool{Name: "add_data_breakpoint", Description: "Install a hardware ('break-on-access') breakpoint at address_hex covering size bytes. size must be 1, 2, 4, or 8. access is any non-empty subset of ['read', 'write', 'execute', 'io']. x64 hardware supports at most four enabled data breakpoints concurrently — the fifth will fail at the next go_execution call."}, s.addDataBreakpoint)
 	mcp.AddTool(server, &mcp.Tool{Name: "configure_breakpoint", Description: "Apply non-positional configuration (pass count, thread filter, WinDbg command) to an existing breakpoint without recreating it. Each field is independently optional: pass_count=0 leaves existing alone; omit match_thread_id to leave alone or pass 0xFFFFFFFF for 'any thread'; omit command to leave alone, pass empty string to clear."}, s.configureBreakpoint)
 	mcp.AddTool(server, &mcp.Tool{Name: "breakpoint_command", Description: "Return the WinDbg command string attached to a breakpoint (empty if none)."}, s.breakpointCommand)
+
+	// --- t1-8 last event / bugcheck ---
+	mcp.AddTool(server, &mcp.Tool{Name: "last_exception", Description: "Return the most recent DEBUG_EVENT_EXCEPTION record reported by DbgEng (the .lastevent / .exr surface). Returns {found:false} when the last event was not an exception — e.g. an attach breakpoint or a process-exit notification. parameters carries raw EXCEPTION_RECORD.ExceptionInformation values (e.g. for access violations [0] is the read/write/execute flag and [1] is the faulting VA)."}, s.lastException)
+	mcp.AddTool(server, &mcp.Tool{Name: "bug_check", Description: "Read the kernel bugcheck record via IDebugControl4::ReadBugCheckData. Kernel-mode sessions only — user-mode targets return {found:false}. name and description are best-effort lookups for ~20 common codes; unknown codes still surface the raw code and four args."}, s.bugCheck)
 }
 
 func (s *srv) attachProcess(ctx context.Context, _ *mcp.CallToolRequest, in attachProcessInput) (*mcp.CallToolResult, okOutput, error) {
@@ -1177,4 +1207,62 @@ func (s *srv) breakpointCommand(ctx context.Context, _ *mcp.CallToolRequest, in 
 		return toolErr[breakpointCommandOutput](err)
 	}
 	return nil, breakpointCommandOutput{Command: cmd}, nil
+}
+
+// --- t1-8 last event / bugcheck ---
+
+func (s *srv) lastException(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, lastExceptionOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[lastExceptionOutput](err)
+	}
+	ex, err := s.sess.LastException()
+	if err != nil {
+		if errors.Is(err, gokd.ErrNotFound) {
+			return nil, lastExceptionOutput{Found: false}, nil
+		}
+		return toolErr[lastExceptionOutput](err)
+	}
+	params := make([]string, 0, ex.ParameterCount)
+	for i := uint32(0); i < ex.ParameterCount; i++ {
+		params = append(params, hex64(ex.Parameters[i]))
+	}
+	return nil, lastExceptionOutput{
+		Found:           true,
+		Code:            ex.Code,
+		CodeHex:         fmt.Sprintf("0x%08x", ex.Code),
+		Flags:           ex.Flags,
+		AddressHex:      hex64(ex.Address),
+		NestedRecordHex: hex64(ex.NestedRecord),
+		ParameterCount:  ex.ParameterCount,
+		Parameters:      params,
+		FirstChance:     ex.FirstChance,
+		ProcessID:       ex.ProcessID,
+		ThreadID:        ex.ThreadID,
+		Description:     ex.Description,
+	}, nil
+}
+
+func (s *srv) bugCheck(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, bugCheckOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[bugCheckOutput](err)
+	}
+	bc, err := s.sess.BugCheck()
+	if err != nil {
+		if errors.Is(err, gokd.ErrNotFound) {
+			return nil, bugCheckOutput{Found: false}, nil
+		}
+		return toolErr[bugCheckOutput](err)
+	}
+	args := make([]string, 0, len(bc.Args))
+	for _, a := range bc.Args {
+		args = append(args, hex64(a))
+	}
+	return nil, bugCheckOutput{
+		Found:       true,
+		Code:        bc.Code,
+		CodeHex:     fmt.Sprintf("0x%08x", bc.Code),
+		Args:        args,
+		Name:        bc.Name,
+		Description: bc.Description,
+	}, nil
 }

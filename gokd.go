@@ -184,6 +184,21 @@ type Session interface {
 	// Escape hatch
 	Execute(cmd string) (string, error)
 
+	// Last event / bugcheck (t1-8). LastException surfaces the most
+	// recent DEBUG_EVENT_EXCEPTION record reported by DbgEng, with the
+	// raw EXCEPTION_RECORD fields (code, address, parameters) and a
+	// human-readable description. Returns (nil, ErrNotFound) when the
+	// last event was not an exception (e.g. an attach breakpoint or
+	// process-exit notification).
+	//
+	// BugCheck reads the kernel bug-check record via
+	// IDebugControl4::ReadBugCheckData; user-mode sessions return
+	// (nil, ErrNotFound). The returned struct carries the raw bugcheck
+	// Code and Args plus a best-effort Name + Description from the
+	// embedded common-codes table (empty strings for unknown codes).
+	LastException() (*LastException, error)
+	BugCheck() (*BugCheck, error)
+
 	Close() error
 }
 
@@ -351,6 +366,28 @@ type ExceptionInfo struct {
 	Code        uint32
 	Address     uint64
 	FirstChance bool
+}
+
+// LastException is the rich exception record returned by Session.LastException.
+// Distinct from ExceptionInfo (used by StopEvent) because it carries the
+// full EXCEPTION_RECORD64 surface — parameters, nested-record pointer,
+// process / thread ID, and the DbgEng-supplied textual description.
+type LastException = dbgcgo.LastException
+
+// ExceptionMaxParameters is the Windows EXCEPTION_MAXIMUM_PARAMETERS
+// constant — re-exported so callers iterating Parameters don't need to
+// import the internal dbgcgo package.
+const ExceptionMaxParameters = dbgcgo.ExceptionMaxParameters
+
+// BugCheck wraps the raw kernel bugcheck record with a best-effort
+// human-readable name and description. Name and Description are filled
+// in by Session.BugCheck via the embedded common-codes table; both are
+// empty strings for codes not in the table.
+type BugCheck struct {
+	Code        uint32
+	Args        [4]uint64
+	Name        string
+	Description string
 }
 
 type Frame struct {
@@ -1363,6 +1400,31 @@ func (s *session) Output() <-chan string {
 
 func (s *session) Execute(cmd string) (string, error) {
 	return s.inner.Execute(cmd)
+}
+
+// LastException returns the most recent DEBUG_EVENT_EXCEPTION record
+// from DbgEng. Returns (nil, ErrNotFound) when the last event was not
+// an exception (e.g. an attach breakpoint or a process-exit event).
+func (s *session) LastException() (*LastException, error) {
+	return s.inner.GetLastException()
+}
+
+// BugCheck reads the kernel bugcheck record and decorates it with a
+// best-effort name + description from the embedded common-codes table.
+// User-mode sessions and kernel sessions with no recorded bugcheck
+// return (nil, ErrNotFound).
+func (s *session) BugCheck() (*BugCheck, error) {
+	bc, err := s.inner.GetBugCheck()
+	if err != nil {
+		return nil, err
+	}
+	name, desc := LookupBugCheckName(bc.Code)
+	return &BugCheck{
+		Code:        bc.Code,
+		Args:        bc.Args,
+		Name:        name,
+		Description: desc,
+	}, nil
 }
 
 func (s *session) Close() error {
