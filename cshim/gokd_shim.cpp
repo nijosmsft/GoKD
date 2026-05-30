@@ -205,6 +205,30 @@ extern "C" int32_t gokd_open_dump(gokd_session_t handle, const char *path) {
     return hr;
 }
 
+extern "C" int32_t gokd_write_dump(gokd_session_t handle,
+                                    const char *path_utf8,
+                                    uint32_t qualifier,
+                                    uint32_t format_flags,
+                                    const char *comment_utf8) {
+    S;
+    if (!path_utf8) return E_INVALIDARG;
+    wchar_t *wpath = utf8_to_wide(path_utf8);
+    if (!wpath) return E_OUTOFMEMORY;
+    wchar_t *wcomment = NULL;
+    if (comment_utf8 && *comment_utf8) {
+        wcomment = utf8_to_wide(comment_utf8);
+        if (!wcomment) { free(wpath); return E_OUTOFMEMORY; }
+    }
+    /* NOTE: blocks the dispatch thread; cannot be interrupted by
+     * gokd_cancel_wait, which only polls the cancellable wait loop. */
+    HRESULT hr = s->client->WriteDumpFileWide(wpath, 0, (ULONG)qualifier,
+                                               (ULONG)format_flags, wcomment);
+    free(wpath);
+    if (wcomment) free(wcomment);
+    SET_LAST_ERROR(hr);
+    return hr;
+}
+
 /* Returns true if the engine is currently attached to a kernel target. */
 bool gokd_is_kernel_session(gokd_session *s) {
     if (!s || !s->control) return false;

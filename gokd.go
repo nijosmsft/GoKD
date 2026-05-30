@@ -52,6 +52,12 @@ type Session interface {
 	CreateProcess(cmd string, opts CreateOptions) error
 	AttachKernel(ctx context.Context, connectStr string, opts KernelOptions) error
 	OpenDump(path string) error
+	// WriteDump snapshots the current target to a .dmp file. path must be
+	// an absolute path. WriteDumpFileWide is synchronous and uncancellable
+	// mid-call — full kernel dumps can take minutes. ctx is honoured at
+	// dispatch-thread granularity (the call will not return early once
+	// DbgEng has begun writing).
+	WriteDump(ctx context.Context, path string, opts WriteDumpOptions) error
 	Detach() error
 
 	// Remote debugging (connect to dbgsrv.exe process server)
@@ -563,6 +569,46 @@ type (
 	MemoryRegion  = dbgcgo.MemoryRegion
 )
 
+// Dump-format types (t1-2) re-exported from the internal layer.
+type (
+	DumpKind        = dbgcgo.DumpKind
+	DumpFormatFlags = dbgcgo.DumpFormatFlags
+)
+
+const (
+	DumpSmall   = dbgcgo.DumpSmall
+	DumpDefault = dbgcgo.DumpDefault
+	DumpFull    = dbgcgo.DumpFull
+
+	DumpFmtDefault                     = dbgcgo.DumpFmtDefault
+	DumpFmtUserSmallFullMemory         = dbgcgo.DumpFmtUserSmallFullMemory
+	DumpFmtUserSmallHandleData         = dbgcgo.DumpFmtUserSmallHandleData
+	DumpFmtUserSmallUnloadedModules    = dbgcgo.DumpFmtUserSmallUnloadedModules
+	DumpFmtUserSmallIndirectMemory     = dbgcgo.DumpFmtUserSmallIndirectMemory
+	DumpFmtUserSmallDataSegments       = dbgcgo.DumpFmtUserSmallDataSegments
+	DumpFmtUserSmallFilterMemory       = dbgcgo.DumpFmtUserSmallFilterMemory
+	DumpFmtUserSmallFilterPaths        = dbgcgo.DumpFmtUserSmallFilterPaths
+	DumpFmtUserSmallProcessThreadData  = dbgcgo.DumpFmtUserSmallProcessThreadData
+	DumpFmtUserSmallPrivateReadWrite   = dbgcgo.DumpFmtUserSmallPrivateReadWrite
+	DumpFmtUserSmallNoOptionalData     = dbgcgo.DumpFmtUserSmallNoOptionalData
+	DumpFmtUserSmallFullMemoryInfo     = dbgcgo.DumpFmtUserSmallFullMemoryInfo
+	DumpFmtUserSmallThreadInfo         = dbgcgo.DumpFmtUserSmallThreadInfo
+	DumpFmtUserSmallCodeSegments       = dbgcgo.DumpFmtUserSmallCodeSegments
+	DumpFmtUserSmallNoAuxiliaryState   = dbgcgo.DumpFmtUserSmallNoAuxiliaryState
+	DumpFmtUserSmallFullAuxiliaryState = dbgcgo.DumpFmtUserSmallFullAuxiliaryState
+)
+
+// WriteDumpOptions configures Session.WriteDump.
+type WriteDumpOptions struct {
+	// Kind selects the dump format. Zero means DumpDefault.
+	Kind DumpKind
+	// Flags is a bitmask of DEBUG_FORMAT_USER_SMALL_* values forwarded
+	// verbatim to WriteDumpFileWide.
+	Flags DumpFormatFlags
+	// Comment is recorded inside the dump; may be empty.
+	Comment string
+}
+
 const (
 	MemCommit  MemoryState = 0x1000
 	MemReserve MemoryState = 0x2000
@@ -703,6 +749,22 @@ func (s *session) AttachKernel(ctx context.Context, connectStr string, opts Kern
 
 func (s *session) OpenDump(path string) error {
 	return s.inner.OpenDump(path)
+}
+
+func (s *session) WriteDump(ctx context.Context, path string, opts WriteDumpOptions) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("gokd: path is required")
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("gokd: WriteDump requires an absolute path (DbgEng resolves relative paths against its own CWD): %q", path)
+	}
+	kind := opts.Kind
+	if kind == 0 {
+		kind = DumpDefault
+	}
+	return s.runWithCancel(ctx, func() error {
+		return s.inner.WriteDump(path, kind, opts.Flags, opts.Comment)
+	})
 }
 
 func (s *session) ConnectRemote(connection string) error {

@@ -322,6 +322,46 @@ int32_t gokd_attach_kernel(gokd_session_t s, const char *options,
 /* Open a crash dump or minidump file for offline analysis. */
 int32_t gokd_open_dump(gokd_session_t s, const char *path);
 
+/* ====================================================================== */
+/*  Write dump (t1-2)                                                     */
+/* ====================================================================== */
+
+#define GOKD_DUMP_SMALL                                1024
+#define GOKD_DUMP_DEFAULT                              1025
+#define GOKD_DUMP_FULL                                 1026
+
+#define GOKD_DUMP_FMT_DEFAULT                          0x0
+#define GOKD_DUMP_FMT_USER_SMALL_FULL_MEMORY           0x1
+#define GOKD_DUMP_FMT_USER_SMALL_HANDLE_DATA           0x2
+#define GOKD_DUMP_FMT_USER_SMALL_UNLOADED_MODULES      0x4
+#define GOKD_DUMP_FMT_USER_SMALL_INDIRECT_MEMORY       0x8
+#define GOKD_DUMP_FMT_USER_SMALL_DATA_SEGMENTS         0x10
+#define GOKD_DUMP_FMT_USER_SMALL_FILTER_MEMORY         0x20
+#define GOKD_DUMP_FMT_USER_SMALL_FILTER_PATHS          0x40
+#define GOKD_DUMP_FMT_USER_SMALL_PROCESS_THREAD_DATA   0x80
+#define GOKD_DUMP_FMT_USER_SMALL_PRIVATE_READ_WRITE    0x100
+#define GOKD_DUMP_FMT_USER_SMALL_NO_OPTIONAL_DATA      0x200
+#define GOKD_DUMP_FMT_USER_SMALL_FULL_MEMORY_INFO      0x400
+#define GOKD_DUMP_FMT_USER_SMALL_THREAD_INFO           0x800
+#define GOKD_DUMP_FMT_USER_SMALL_CODE_SEGMENTS         0x1000
+#define GOKD_DUMP_FMT_USER_SMALL_NO_AUXILIARY_STATE    0x2000
+#define GOKD_DUMP_FMT_USER_SMALL_FULL_AUXILIARY_STATE  0x4000
+
+/*
+ * Write the current target state to path. qualifier selects the dump kind
+ * (see GOKD_DUMP_*); format_flags is the DEBUG_FORMAT_USER_SMALL_* bitmask
+ * forwarded verbatim. comment_utf8 may be NULL.
+ *
+ * IMPORTANT: WriteDumpFileWide is synchronous and uncancellable mid-call —
+ * full kernel dumps can take minutes. gokd_cancel_wait does NOT interrupt
+ * this call; cancellation only takes effect between dispatch turns.
+ */
+int32_t gokd_write_dump(gokd_session_t s,
+                         const char *path_utf8,
+                         uint32_t qualifier,
+                         uint32_t format_flags,
+                         const char *comment_utf8);
+
 /* Detach from the current target. */
 int32_t gokd_detach(gokd_session_t s);
 

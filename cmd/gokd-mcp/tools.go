@@ -284,6 +284,16 @@ type queryRegionOutput struct {
 	TypeHex              string `json:"type_hex"`
 }
 
+// --- t1-2 write dump ---
+
+type writeDumpInput struct {
+	Path           string `json:"path" jsonschema:"absolute output path for the .dmp file"`
+	Kind           string `json:"kind,omitempty" jsonschema:"dump kind: 'small' | 'default' | 'full' (default 'default')"`
+	Flags          uint32 `json:"flags,omitempty" jsonschema:"DEBUG_FORMAT_USER_SMALL_* bitmask forwarded raw"`
+	Comment        string `json:"comment,omitempty" jsonschema:"optional comment recorded inside the dump"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty" jsonschema:"timeout in seconds; 0 means no timeout. Default 600 if omitted."`
+}
+
 func toolErr[Out any](err error) (*mcp.CallToolResult, Out, error) {
 	var zero Out
 	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, zero, nil
@@ -364,6 +374,9 @@ func registerTools(server *mcp.Server, s *srv) {
 	mcp.AddTool(server, &mcp.Tool{Name: "search_memory", Description: "Scan [start_hex, start_hex+length) for pattern_hex via IDebugDataSpaces4::SearchVirtual. granularity must be 1, 4, or 8 (defaults to 1). Returns {found:false, match_hex:\"\"} when the pattern is not present so callers can loop without exception handling. Keep length small (<= 4 KB) — SearchVirtual is slow on large ranges."}, s.searchMemory)
 	mcp.AddTool(server, &mcp.Tool{Name: "virtual_to_physical", Description: "Translate a virtual address to a physical address via IDebugDataSpaces4::VirtualToPhysical. Kernel-mode sessions only; user-mode targets fail with E_NOTIMPL or similar."}, s.virtualToPhysical)
 	mcp.AddTool(server, &mcp.Tool{Name: "query_region", Description: "Return the MEMORY_BASIC_INFORMATION64 record covering va_hex via IDebugDataSpaces4::QueryVirtual. Fields use raw Windows numerics: state (MEM_COMMIT=0x1000, MEM_RESERVE=0x2000, MEM_FREE=0x10000), type (MEM_PRIVATE=0x20000, MEM_MAPPED=0x40000, MEM_IMAGE=0x1000000), protect (PAGE_* flags)."}, s.queryRegion)
+
+	// --- t1-2 write dump ---
+	mcp.AddTool(server, &mcp.Tool{Name: "write_dump", Description: "Snapshot the current target to a .dmp file via IDebugClient5::WriteDumpFileWide. path must be absolute. kind is 'small' (1024), 'default' (1025), or 'full' (1026) — defaults to 'default'. flags is the raw DEBUG_FORMAT_USER_SMALL_* bitmask. Synchronous and uncancellable mid-call; default timeout_seconds is 600. Use to capture state for offline analysis."}, s.writeDump)
 }
 
 func (s *srv) attachProcess(ctx context.Context, _ *mcp.CallToolRequest, in attachProcessInput) (*mcp.CallToolResult, okOutput, error) {
@@ -1043,4 +1056,38 @@ func (s *srv) queryRegion(ctx context.Context, _ *mcp.CallToolRequest, in queryR
 		ProtectHex:           fmt.Sprintf("0x%x", uint32(r.Protect)),
 		TypeHex:              fmt.Sprintf("0x%x", uint32(r.Type)),
 	}, nil
+}
+
+func (s *srv) writeDump(ctx context.Context, _ *mcp.CallToolRequest, in writeDumpInput) (*mcp.CallToolResult, okOutput, error) {
+	if strings.TrimSpace(in.Path) == "" {
+		return toolErr[okOutput](fmt.Errorf("path is required"))
+	}
+	var kind gokd.DumpKind
+	switch strings.ToLower(strings.TrimSpace(in.Kind)) {
+	case "", "default":
+		kind = gokd.DumpDefault
+	case "small":
+		kind = gokd.DumpSmall
+	case "full":
+		kind = gokd.DumpFull
+	default:
+		return toolErr[okOutput](fmt.Errorf("invalid kind: %q (want 'small', 'default', or 'full')", in.Kind))
+	}
+	timeout := in.TimeoutSeconds
+	if timeout == 0 {
+		timeout = 600
+	}
+	ctx, cancel, err := contextWithSeconds(ctx, timeout)
+	if err != nil {
+		return toolErr[okOutput](err)
+	}
+	defer cancel()
+	if err := s.sess.WriteDump(ctx, in.Path, gokd.WriteDumpOptions{
+		Kind:    kind,
+		Flags:   gokd.DumpFormatFlags(in.Flags),
+		Comment: in.Comment,
+	}); err != nil {
+		return toolErr[okOutput](err)
+	}
+	return nil, okOutput{OK: true}, nil
 }

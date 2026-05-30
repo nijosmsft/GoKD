@@ -218,6 +218,59 @@ func (s *Session) OpenDump(path string) error {
 	return hresult(hr)
 }
 
+// DumpKind selects the dump format: small, default, or full. Mirrors
+// DEBUG_DUMP_SMALL/DEFAULT/FULL.
+type DumpKind uint32
+
+const (
+	DumpSmall   DumpKind = 1024
+	DumpDefault DumpKind = 1025
+	DumpFull    DumpKind = 1026
+)
+
+// DumpFormatFlags is a bitmask of DEBUG_FORMAT_USER_SMALL_* flags
+// controlling what data the dump includes.
+type DumpFormatFlags uint32
+
+const (
+	DumpFmtDefault                     DumpFormatFlags = 0x0
+	DumpFmtUserSmallFullMemory         DumpFormatFlags = 0x1
+	DumpFmtUserSmallHandleData         DumpFormatFlags = 0x2
+	DumpFmtUserSmallUnloadedModules    DumpFormatFlags = 0x4
+	DumpFmtUserSmallIndirectMemory     DumpFormatFlags = 0x8
+	DumpFmtUserSmallDataSegments       DumpFormatFlags = 0x10
+	DumpFmtUserSmallFilterMemory       DumpFormatFlags = 0x20
+	DumpFmtUserSmallFilterPaths        DumpFormatFlags = 0x40
+	DumpFmtUserSmallProcessThreadData  DumpFormatFlags = 0x80
+	DumpFmtUserSmallPrivateReadWrite   DumpFormatFlags = 0x100
+	DumpFmtUserSmallNoOptionalData     DumpFormatFlags = 0x200
+	DumpFmtUserSmallFullMemoryInfo     DumpFormatFlags = 0x400
+	DumpFmtUserSmallThreadInfo         DumpFormatFlags = 0x800
+	DumpFmtUserSmallCodeSegments       DumpFormatFlags = 0x1000
+	DumpFmtUserSmallNoAuxiliaryState   DumpFormatFlags = 0x2000
+	DumpFmtUserSmallFullAuxiliaryState DumpFormatFlags = 0x4000
+)
+
+// WriteDump snapshots the current target to path. The call blocks the
+// dispatch thread; gokd_cancel_wait does NOT interrupt it, so callers
+// can only enforce timeouts by stopping the session itself. Pass an
+// absolute path — relative paths resolve against DbgEng's CWD.
+func (s *Session) WriteDump(path string, kind DumpKind, flags DumpFormatFlags, comment string) error {
+	var hr C.int32_t
+	s.exec(func() {
+		cpath := C.CString(path)
+		defer C.free(unsafe.Pointer(cpath))
+		var ccomment *C.char
+		if comment != "" {
+			ccomment = C.CString(comment)
+			defer C.free(unsafe.Pointer(ccomment))
+		}
+		hr = C.gokd_write_dump(s.handle, cpath,
+			C.uint32_t(kind), C.uint32_t(flags), ccomment)
+	})
+	return hresult(hr)
+}
+
 func (s *Session) Detach() error {
 	var hr C.int32_t
 	s.exec(func() {
