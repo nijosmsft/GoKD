@@ -1,5 +1,8 @@
 # GoKD
 
+[![CI](https://github.com/nijosmsft/gokd/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nijosmsft/gokd/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/nijosmsft/gokd.svg)](https://pkg.go.dev/github.com/nijosmsft/gokd)
+
 Go library for Windows kernel- and user-mode debugging, built on the Windows DbgEng engine
 (`dbgeng.dll`) — the same engine that powers `kd.exe`, `cdb.exe`, and `windbg.exe`.
 
