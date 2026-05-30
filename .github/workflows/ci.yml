@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    name: Build & user-mode tests (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go 1.25
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          check-latest: true
+          cache: true
+
+      - name: Set up MSYS2 / MinGW-w64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          path-type: inherit
+          install: >-
+            make
+            mingw-w64-x86_64-gcc
+
+      - name: Show toolchain versions
+        run: |
+          set -euo pipefail
+          go version
+          g++ --version | head -1
+          make --version | head -1
+
+      # CLAUDE.md: WINDBG_SDK / WINDOWS_SDK_INCLUDE must be unset so MinGW
+      # picks up its own dbgeng.h / dbghelp.h (which carry the __CRT_UUID_DECL
+      # annotations g++ needs for __uuidof).
+      - name: Build C++ shim (libgokd_shim.a)
+        run: |
+          set -euo pipefail
+          unset WINDBG_SDK WINDOWS_SDK_INCLUDE
+          make -C cshim
+
+      - name: go vet
+        run: |
+          set -euo pipefail
+          unset WINDBG_SDK WINDOWS_SDK_INCLUDE
+          go vet ./...
+
+      - name: go build (library + commands)
+        run: |
+          set -euo pipefail
+          unset WINDBG_SDK WINDOWS_SDK_INCLUDE
+          go build ./...
+          mkdir -p bin
+          go build -o bin/gokd.exe ./cmd/gokd
+          go build -o bin/gokd-mcp.exe ./cmd/gokd-mcp
+
+      # User-mode tests only. The KDNET kernel test is gated on KDNET_CONN
+      # and skips automatically. We exclude it by name to keep the log clean.
+      - name: User-mode tests
+        run: |
+          set -euo pipefail
+          unset WINDBG_SDK WINDOWS_SDK_INCLUDE
+          go test -v -timeout 5m -run "TestSessionCreateClose|TestAttachDetach|TestModules" .
+
+      - name: MCP server smoke test (manual tag)
+        run: |
+          set -euo pipefail
+          unset WINDBG_SDK WINDOWS_SDK_INCLUDE
+          go test -tags manual -v -timeout 2m -run TestMCPSmoke ./cmd/gokd-mcp/
+
+      - name: Upload built binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gokd-bin-${{ github.sha }}
+          path: bin/
+          if-no-files-found: warn
+          retention-days: 7
