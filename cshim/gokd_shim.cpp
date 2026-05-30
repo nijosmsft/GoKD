@@ -168,9 +168,44 @@ extern "C" int32_t gokd_open_dump(gokd_session_t handle, const char *path) {
     return hr;
 }
 
+/* Returns true if the engine is currently attached to a kernel target. */
+bool gokd_is_kernel_session(gokd_session *s) {
+    if (!s || !s->control) return false;
+    ULONG cls = 0, qual = 0;
+    if (FAILED(s->control->GetDebuggeeType(&cls, &qual))) return false;
+    return cls == DEBUG_CLASS_KERNEL;
+}
+
+/* For a halted kernel target, request resume and drain the resulting
+ * event so the KDNET stub continues execution before we close the
+ * session. Without this, EndSession leaves the target frozen in the
+ * debug stub and the VM appears offline until something reattaches
+ * and issues Go. Safe to call on any session: no-ops on non-kernel
+ * and silently absorbs errors from already-running targets. */
+void gokd_resume_kernel_target(gokd_session *s) {
+    if (!gokd_is_kernel_session(s)) return;
+    ULONG status = 0;
+    if (FAILED(s->control->GetExecutionStatus(&status))) return;
+    if (status == DEBUG_STATUS_BREAK) {
+        s->control->SetExecutionStatus(DEBUG_STATUS_GO);
+        /* Short wait to flush the Go to the target. We don't actually
+         * want to block waiting for the next break. */
+        s->control->WaitForEvent(DEBUG_WAIT_DEFAULT, 2000);
+    }
+}
+
 extern "C" int32_t gokd_detach(gokd_session_t handle) {
     S;
-    HRESULT hr = s->client->DetachProcesses();
+    HRESULT hr;
+    if (gokd_is_kernel_session(s)) {
+        /* Kernel targets: resume then active-detach so the target
+         * continues execution. DetachProcesses() is a no-op for
+         * kernel sessions. */
+        gokd_resume_kernel_target(s);
+        hr = s->client->EndSession(DEBUG_END_ACTIVE_DETACH);
+    } else {
+        hr = s->client->DetachProcesses();
+    }
     SET_LAST_ERROR(hr);
     return hr;
 }

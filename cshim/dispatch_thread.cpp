@@ -226,6 +226,11 @@ extern "C" void gokd_destroy_session(gokd_session_t handle) {
     gokd_session *s = (gokd_session *)(uintptr_t)handle;
 
     if (s->client) {
+        /* For kernel targets, resume the debuggee before ending the
+         * session — otherwise the target stays frozen in the KDNET
+         * debug stub and the VM appears offline. No-op for user-mode
+         * or unattached sessions. */
+        gokd_resume_kernel_target(s);
         s->client->SetEventCallbacksWide(NULL);
         s->client->SetOutputCallbacksWide(NULL);
         s->client->EndSession(DEBUG_END_PASSIVE);

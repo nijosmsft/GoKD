@@ -66,3 +66,7 @@ IDebugEventCallbacksWide *gokd_create_event_callbacks(gokd_session *s);
 IDebugOutputCallbacksWide *gokd_create_output_callbacks(gokd_session *s);
 void gokd_destroy_event_callbacks(IDebugEventCallbacksWide *cbs);
 void gokd_destroy_output_callbacks(IDebugOutputCallbacksWide *cbs);
+
+/* Kernel session helpers (gokd_shim.cpp). */
+bool gokd_is_kernel_session(gokd_session *s);
+void gokd_resume_kernel_target(gokd_session *s);
