@@ -2,7 +2,8 @@ package main
 
 import (
 	"context"
-	"log"
+	"io"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -50,7 +51,7 @@ func TestDrainerPushesToRingsForUnregisteredServer(t *testing.T) {
 	// Even with no servers registered, the drainer must still update
 	// the rings so get_recent_events / get_recent_output keep working.
 	state := newSrv(&stubSession{}, false, false)
-	d := newDrainer(state, log.New(newDiscardWriter(), "", 0))
+	d := newDrainer(state, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	hook := &drainerHook{drainer: d, bc: &fakeBroadcaster{}}
 	hook.feedEvent(gokd.BreakpointEvent{ID: 5, Address: 0x1000})
 	hook.feedEvent(gokd.ProcessExitedEvent{ExitCode: 1})
@@ -135,11 +136,3 @@ func TestDrainerStateChangedTransition(t *testing.T) {
 		t.Errorf("prevLast=%q want exited", d.prevLast)
 	}
 }
-
-// ----- helpers -----
-
-type discardWriter struct{}
-
-func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
-
-func newDiscardWriter() *discardWriter { return &discardWriter{} }

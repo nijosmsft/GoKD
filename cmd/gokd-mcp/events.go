@@ -3,7 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -161,9 +162,16 @@ func (s *srv) pushOutput(line string) ringOutput {
 // notifications to every connected ServerSession on every registered
 // *mcp.Server. The set of servers is mutable: the listen loop calls
 // d.addServer(...) for every new connection.
+//
+// Engine output is logged at slog.Debug — high-volume target stdout is
+// noisy unless you are debugging DbgEng itself. Events (breakpoint hit,
+// exception, module load, process exit) are logged at slog.Info because
+// they are debuggee state-change signals callers generally want to see.
+// At the default -log-level=info, engine output is suppressed; pass
+// -log-level=debug to see it.
 type drainer struct {
 	s      *srv
-	logger *log.Logger
+	logger *slog.Logger
 
 	mu      sync.Mutex
 	servers []*mcp.Server
@@ -190,7 +198,7 @@ const (
 	outputCap    = 4096
 )
 
-func newDrainer(s *srv, logger *log.Logger) *drainer {
+func newDrainer(s *srv, logger *slog.Logger) *drainer {
 	return &drainer{s: s, logger: logger}
 }
 
@@ -208,7 +216,9 @@ func (d *drainer) run(sess gokd.Session) {
 		for ev := range sess.Events() {
 			entry := d.s.pushEvent(ev)
 			if d.logger != nil {
-				d.logger.Printf("[event] %s", entry.Description)
+				d.logger.Info("engine event",
+					slog.String("kind", entry.Kind),
+					slog.String("event", entry.Description))
 			}
 			d.broadcast(context.Background(), &mcp.LoggingMessageParams{
 				Logger: "gokd/event",
@@ -222,7 +232,8 @@ func (d *drainer) run(sess gokd.Session) {
 		for out := range sess.Output() {
 			entry := d.s.pushOutput(out)
 			if d.logger != nil {
-				d.logger.Print(entry.Text)
+				d.logger.Debug("engine output",
+					slog.String("text", strings.TrimRight(entry.Text, "\r\n")))
 			}
 			d.queueOutput(entry)
 		}
