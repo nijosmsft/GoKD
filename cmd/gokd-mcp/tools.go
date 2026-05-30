@@ -522,6 +522,11 @@ func registerTools(server *mcp.Server, s *srv) {
 	addToolMaybe(s, server, &mcp.Tool{Name: "detach", Description: "Detach from the current target."}, s.detach)
 	addToolMaybe(s, server, &mcp.Tool{Name: "connect_remote", Description: "Connect to a DbgEng dbgsrv process server."}, s.connectRemote)
 	addToolMaybe(s, server, &mcp.Tool{Name: "disconnect_remote", Description: "Disconnect from the current DbgEng process server."}, s.disconnectRemote)
+
+	// ---- Orientation and state ----
+	addToolMaybe(s, server, &mcp.Tool{Name: "get_session_state", Description: "Single-call snapshot of the gokd session: attached/target_kind/target_name, status (no_target|running|broken_in|exited|unknown), radix, expression_syntax, symbol_path, counts (threads, modules, breakpoints, pending_events, pending_output), last event, and recommended_next_tools. Call this first when uncertain about the session."}, s.getSessionState)
+	addToolMaybe(s, server, &mcp.Tool{Name: "get_recent_events", Description: "Pull recent gokd Events that the drainer recorded (breakpoint/exception/module-loaded/etc.). Paged via since_token + limit (default 32, max 32). Clients without notification subscriptions poll this in lieu of gokd/event log notifications."}, s.getRecentEvents)
+	addToolMaybe(s, server, &mcp.Tool{Name: "get_recent_output", Description: "Pull recent dbgeng output lines that the drainer recorded. Paged via since_token + limit (default 64, max 256). Clients without notification subscriptions poll this in lieu of gokd/output log notifications."}, s.getRecentOutput)
 	addToolMaybe(s, server, &mcp.Tool{Name: "get_modules", Description: "List modules loaded in the current target, optionally filtered by name_glob and paginated via offset/limit. Returns base address, size, and name for each module. Limit defaults to 100 and is capped at 500."}, s.getModules)
 	addToolMaybe(s, server, &mcp.Tool{Name: "get_threads", Description: "List threads in the current target."}, s.getThreads)
 	addToolMaybe(s, server, &mcp.Tool{Name: "set_thread", Description: "Set the current thread by system thread ID."}, s.setThread)
