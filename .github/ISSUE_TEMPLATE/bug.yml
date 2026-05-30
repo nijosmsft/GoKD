@@ -1,0 +1,88 @@
+name: Bug report
+description: Report something that is broken in GoKD or gokd-mcp.
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please fill in as much
+        detail as you can — debugger bugs are very hard to triage without
+        target details and the path to the `dbgeng.dll` GoKD loaded.
+
+  - type: dropdown
+    id: target_type
+    attributes:
+      label: What is the target type?
+      options:
+        - User-mode process
+        - Kernel target (KDNET)
+        - Crash dump
+        - Remote dbgsrv
+        - Unsure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: binary
+    attributes:
+      label: Which binary?
+      options:
+        - gokd-mcp
+        - gokd (CLI)
+        - Library only (consumed from another Go program)
+    validations:
+      required: true
+
+  - type: input
+    id: windows_version
+    attributes:
+      label: Windows version
+      description: Output of `winver` or `[System.Environment]::OSVersion.Version`.
+      placeholder: "e.g. Windows 11 26100.2161"
+    validations:
+      required: true
+
+  - type: textarea
+    id: dbgeng_path
+    attributes:
+      label: dbgeng.dll path probe
+      description: |
+        We need to know which `dbgeng.dll` GoKD loaded. Either set
+        `GOKD_DBGENG_PATH=C:\path\to\dbgeng.dll` explicitly and paste it
+        here, OR grep your `gokd-mcp.log` for the line that records the
+        loaded path.
+      render: text
+      placeholder: |
+        GOKD_DBGENG_PATH=C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\dbgeng.dll
+    validations:
+      required: true
+
+  - type: input
+    id: nt_symbol_path
+    attributes:
+      label: _NT_SYMBOL_PATH value
+      description: The contents of your `_NT_SYMBOL_PATH` environment variable.
+      placeholder: "srv*C:\\symbols*https://msdl.microsoft.com/download/symbols"
+    validations:
+      required: false
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact command lines, MCP requests, or Go API calls.
+      placeholder: |
+        1. `gokd.exe -attach 1234`
+        2. `bp kernel32!CreateFileW`
+        3. `g`
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_actual
+    attributes:
+      label: What did you expect, and what actually happened?
+      description: Include full error messages, HRESULT values, and stack traces.
+    validations:
+      required: true

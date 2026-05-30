@@ -1,0 +1,55 @@
+name: Crash dump triage
+description: Open an issue about a specific crash dump GoKD failed to handle.
+title: "[CRASH-DUMP] "
+labels: ["crash-dump"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please capture and attach the output of:
+
+        ```
+        gokd.exe -dump <path> -c "version;lm;.lastevent;k 32" > out.txt
+        ```
+
+        Paste `out.txt` into the "Captured output" field below. **Text
+        only — do not attach the dump itself, and scrub any PII** (paths,
+        user names, machine names) before sharing.
+
+  - type: input
+    id: target_build
+    attributes:
+      label: Target Windows build
+      description: From the `version` line of the captured output.
+      placeholder: "e.g. 10.0.22631.4317"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: dump_kind
+    attributes:
+      label: Dump kind
+      options:
+        - Minidump (user-mode)
+        - Kernel minidump
+        - Kernel summary / full dump
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: bugcheck
+    attributes:
+      label: Bugcheck code (if known)
+      placeholder: "e.g. 0x1E KMODE_EXCEPTION_NOT_HANDLED"
+    validations:
+      required: false
+
+  - type: textarea
+    id: captured_output
+    attributes:
+      label: Captured output
+      description: Paste `out.txt` from the command above.
+      render: text
+    validations:
+      required: true
