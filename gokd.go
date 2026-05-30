@@ -371,6 +371,46 @@ type ProcessExitedEvent  struct{ ExitCode uint32 }
 type ModuleLoadedEvent   struct{ Module *Module }
 type ModuleUnloadedEvent struct{ ImageBaseName string; BaseOffset uint64 }
 
+// SessionStatus describes a DbgEng session-lifecycle transition delivered
+// via SessionStatusEvent. Values mirror dbgeng.h DEBUG_SESSION_*.
+type SessionStatus uint32
+
+const (
+	SessionStatusActive               SessionStatus = 0
+	SessionStatusEndActiveTerminate   SessionStatus = 1
+	SessionStatusEndActiveDetach      SessionStatus = 2
+	SessionStatusEndPassive           SessionStatus = 3
+	SessionStatusEnd                  SessionStatus = 4
+	SessionStatusReboot               SessionStatus = 5
+	SessionStatusHibernate            SessionStatus = 6
+	SessionStatusFailure              SessionStatus = 7
+)
+
+func (s SessionStatus) String() string {
+	switch s {
+	case SessionStatusActive:
+		return "Active"
+	case SessionStatusEndActiveTerminate:
+		return "EndActiveTerminate"
+	case SessionStatusEndActiveDetach:
+		return "EndActiveDetach"
+	case SessionStatusEndPassive:
+		return "EndPassive"
+	case SessionStatusEnd:
+		return "End"
+	case SessionStatusReboot:
+		return "Reboot"
+	case SessionStatusHibernate:
+		return "Hibernate"
+	case SessionStatusFailure:
+		return "Failure"
+	default:
+		return fmt.Sprintf("SessionStatus(%d)", uint32(s))
+	}
+}
+
+type SessionStatusEvent struct{ Status SessionStatus }
+
 func (BreakpointEvent)    isEvent() {}
 func (ExceptionEvent)     isEvent() {}
 func (ThreadCreatedEvent) isEvent() {}
@@ -379,6 +419,7 @@ func (ProcessCreatedEvent) isEvent() {}
 func (ProcessExitedEvent) isEvent() {}
 func (ModuleLoadedEvent)  isEvent() {}
 func (ModuleUnloadedEvent) isEvent() {}
+func (SessionStatusEvent) isEvent() {}
 
 // ── session implementation ────────────────────────────────────────────
 
@@ -748,6 +789,8 @@ func (s *session) Events() <-chan Event {
 					ImageBaseName: d.ImageBaseName,
 					BaseOffset:    d.BaseOffset,
 				}
+			case dbgcgo.EvSessionStatus:
+				ev = SessionStatusEvent{Status: SessionStatus(d.Status)}
 			default:
 				continue
 			}

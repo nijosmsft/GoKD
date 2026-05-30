@@ -234,6 +234,13 @@ public:
     }
 
     STDMETHOD(SessionStatus)(ULONG status) {
+        SESSION_FROM_THIS;
+        if (sess->event_fn) {
+            gokd_ev_session_status_t ev = {};
+            ev.status = status;
+            sess->event_fn((gokd_session_t)(uintptr_t)sess,
+                           GOKD_EVENT_SESSION_STATUS, &ev, sess->event_ctx);
+        }
         return S_OK;
     }
 

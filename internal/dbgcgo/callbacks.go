@@ -20,14 +20,27 @@ import (
 // ── Event types (mirrors GOKD_EVENT_* constants) ──────────────────────
 
 const (
-	EventBreakpoint    = C.GOKD_EVENT_BREAKPOINT
-	EventException     = C.GOKD_EVENT_EXCEPTION
-	EventThreadCreated = C.GOKD_EVENT_THREAD_CREATED
-	EventThreadExited  = C.GOKD_EVENT_THREAD_EXITED
-	EventProcCreated   = C.GOKD_EVENT_PROC_CREATED
-	EventProcExited    = C.GOKD_EVENT_PROC_EXITED
-	EventModLoaded     = C.GOKD_EVENT_MOD_LOADED
-	EventModUnloaded   = C.GOKD_EVENT_MOD_UNLOADED
+	EventBreakpoint     = C.GOKD_EVENT_BREAKPOINT
+	EventException      = C.GOKD_EVENT_EXCEPTION
+	EventThreadCreated  = C.GOKD_EVENT_THREAD_CREATED
+	EventThreadExited   = C.GOKD_EVENT_THREAD_EXITED
+	EventProcCreated    = C.GOKD_EVENT_PROC_CREATED
+	EventProcExited     = C.GOKD_EVENT_PROC_EXITED
+	EventModLoaded      = C.GOKD_EVENT_MOD_LOADED
+	EventModUnloaded    = C.GOKD_EVENT_MOD_UNLOADED
+	EventSessionStatus  = C.GOKD_EVENT_SESSION_STATUS
+)
+
+// SessionStatus codes (mirrors DEBUG_SESSION_* / GOKD_SESSION_*).
+const (
+	SessionActive                   = C.GOKD_SESSION_ACTIVE
+	SessionEndActiveTerminate       = C.GOKD_SESSION_END_SESSION_ACTIVE_TERMINATE
+	SessionEndActiveDetach          = C.GOKD_SESSION_END_SESSION_ACTIVE_DETACH
+	SessionEndPassive               = C.GOKD_SESSION_END_SESSION_PASSIVE
+	SessionEnd                      = C.GOKD_SESSION_END
+	SessionReboot                   = C.GOKD_SESSION_REBOOT
+	SessionHibernate                = C.GOKD_SESSION_HIBERNATE
+	SessionFailure                  = C.GOKD_SESSION_FAILURE
 )
 
 // ── Event data types ──────────────────────────────────────────────────
@@ -78,6 +91,10 @@ type EvModLoaded struct {
 type EvModUnloaded struct {
 	BaseOffset    uint64
 	ImageBaseName string
+}
+
+type EvSessionStatus struct {
+	Status uint32
 }
 
 // Event is a tagged union delivered on the event channel.
@@ -216,6 +233,9 @@ func goEventCallback(s C.gokd_session_t, eventType C.int,
 			BaseOffset:    uint64(d.base_offset),
 			ImageBaseName: C.GoString(&d.image_base_name[0]),
 		}
+	case EventSessionStatus:
+		d := (*C.gokd_ev_session_status_t)(eventData)
+		ev.Data = EvSessionStatus{Status: uint32(d.status)}
 	default:
 		return
 	}

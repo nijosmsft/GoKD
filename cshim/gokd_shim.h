@@ -115,6 +115,17 @@ typedef struct {
 #define GOKD_EVENT_PROC_EXITED     6
 #define GOKD_EVENT_MOD_LOADED      7
 #define GOKD_EVENT_MOD_UNLOADED    8
+#define GOKD_EVENT_SESSION_STATUS  9
+
+/* SessionStatus codes mirror the DEBUG_SESSION_* constants in dbgeng.h. */
+#define GOKD_SESSION_ACTIVE                       0
+#define GOKD_SESSION_END_SESSION_ACTIVE_TERMINATE 1
+#define GOKD_SESSION_END_SESSION_ACTIVE_DETACH    2
+#define GOKD_SESSION_END_SESSION_PASSIVE          3
+#define GOKD_SESSION_END                          4
+#define GOKD_SESSION_REBOOT                       5
+#define GOKD_SESSION_HIBERNATE                    6
+#define GOKD_SESSION_FAILURE                      7
 
 /* Stop reasons (returned by gokd_go/step_in/step_over/step_out) */
 #define GOKD_STOP_BREAKPOINT    1
@@ -181,6 +192,10 @@ typedef struct {
     uint64_t base_offset;
     char     image_base_name[256];
 } gokd_ev_mod_unloaded_t;
+
+typedef struct {
+    uint32_t status; /* GOKD_SESSION_* */
+} gokd_ev_session_status_t;
 
 /* ====================================================================== */
 /*  Callbacks                                                             */
