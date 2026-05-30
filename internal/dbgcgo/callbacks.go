@@ -141,9 +141,14 @@ func (s *Session) UnregisterCallbacks() {
 func goEventCallback(s C.gokd_session_t, eventType C.int,
 	eventData unsafe.Pointer, ctx unsafe.Pointer) {
 
+	// Hold the read lock across the channel send so that
+	// UnregisterCallbacks (which takes the write lock before closing the
+	// channel) cannot close the channel between our lookup and our send.
+	// The send is non-blocking (select-default), so holding the read lock
+	// here does not introduce contention beyond the unregister path.
 	cbMu.RLock()
+	defer cbMu.RUnlock()
 	ch, ok := eventChans[s]
-	cbMu.RUnlock()
 	if !ok || ch == nil {
 		return
 	}
@@ -231,4 +236,28 @@ func goOutputCallback(mask C.uint32_t, text *C.char, ctx unsafe.Pointer) {
 		default:
 		}
 	}
+}
+
+// ── Test helpers (exported for the dbgcgo race tests) ─────────────────
+// These keep callbacks_race_test.go free of "import C" so it builds.
+
+func registerEventChanForTest(handle uint64, ch chan Event) {
+	cbMu.Lock()
+	eventChans[C.gokd_session_t(handle)] = ch
+	cbMu.Unlock()
+}
+
+func unregisterEventChanForTest(handle uint64) {
+	cbMu.Lock()
+	if ch, ok := eventChans[C.gokd_session_t(handle)]; ok {
+		close(ch)
+		delete(eventChans, C.gokd_session_t(handle))
+	}
+	cbMu.Unlock()
+}
+
+func fireBreakpointEventForTest(handle uint64) {
+	var ev C.gokd_ev_breakpoint_t
+	goEventCallback(C.gokd_session_t(handle), C.int(EventBreakpoint),
+		unsafe.Pointer(&ev), nil)
 }

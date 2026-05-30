@@ -6,6 +6,7 @@ cshim/*.o
 *.lib
 *.a
 *.o
+*.d
 
 # Deploy bundle (built by README "Deploying" steps)
 deploy/

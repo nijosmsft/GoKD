@@ -36,29 +36,38 @@ func cmdDetach(s gokd.Session, args []string) error {
 
 func cmdQuit(gokd.Session, []string) error { return errQuit }
 
-func cmdHelp(gokd.Session, []string) error {
-	printf(`Commands:
-  attach <pid>        attach to process
-  detach              detach target
-  bp <addr|symbol>    set breakpoint
-  bl                  list breakpoints
-  bc|bd|be <id>       clear/disable/enable breakpoint
-  g | t | p | gu      go / step in / step over / step out
-  bi                  break in
-  k                   stack
-  r [regs...]         registers
-  dq|dd|db <addr> [count]
-  dt <module>!<type>  type fields
-  lm                  modules
-  u <addr> [count]    disassemble
-  th                  threads
-  st <sysTID>         set thread
-  sym [path]          get/set symbol path
-  n2a <name>          name to address
-  a2n <addr>          address to name
-  !<cmd>              execute raw dbgeng command
-  q | quit | exit     quit
-`)
+func cmdHelp(_ gokd.Session, args []string) error {
+	if len(args) == 0 {
+		printf("Commands:\n")
+		names := sortedCommandNames()
+		var maxLen int
+		for _, n := range names {
+			if len(n) > maxLen {
+				maxLen = len(n)
+			}
+		}
+		for _, n := range names {
+			printf("  %-*s  %s\n", maxLen, n, commands[n].Short)
+		}
+		printf("  %-*s  %s\n", maxLen, "!<cmd>", "execute raw dbgeng command")
+		printf("\nType 'help <command>' for details and examples.\n")
+		return nil
+	}
+	name := strings.ToLower(args[0])
+	spec, ok := commands[name]
+	if !ok {
+		return fmt.Errorf("unknown command: %s", name)
+	}
+	printf("%s -- %s\n", name, spec.Short)
+	if spec.Long != "" {
+		printf("\n%s\n", spec.Long)
+	}
+	if len(spec.Examples) > 0 {
+		printf("\nExamples:\n")
+		for _, ex := range spec.Examples {
+			printf("  %s\n", ex)
+		}
+	}
 	return nil
 }
 
@@ -100,7 +109,7 @@ func cmdBL(s gokd.Session, args []string) error {
 	if err != nil {
 		return err
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	tw := tabwriter.NewWriter(outWriter, 0, 0, 2, ' ', 0)
 	stdoutMu.Lock()
 	defer stdoutMu.Unlock()
 	fmt.Fprintln(tw, "id\ten\taddr\texpr")
@@ -244,7 +253,7 @@ func cmdLM(s gokd.Session, args []string) error {
 	if err != nil {
 		return err
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	tw := tabwriter.NewWriter(outWriter, 0, 0, 2, ' ', 0)
 	stdoutMu.Lock()
 	defer stdoutMu.Unlock()
 	fmt.Fprintln(tw, "base\tsize\tname")
@@ -287,7 +296,7 @@ func cmdThreads(s gokd.Session, args []string) error {
 	if err != nil {
 		return err
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	tw := tabwriter.NewWriter(outWriter, 0, 0, 2, ' ', 0)
 	stdoutMu.Lock()
 	defer stdoutMu.Unlock()
 	fmt.Fprintln(tw, "sysid\thandle\tteb\tstart")
