@@ -114,6 +114,41 @@ func main() {
 }
 ```
 
+## Interactive CLI
+
+A small reference debugger ships with the library at `cmd/gokd/`. Build it the same
+way as the library, then point it at any target:
+
+```bash
+go build -o bin/gokd.exe ./cmd/gokd
+
+bin\gokd.exe -pid 1234                              # attach to a running process
+bin\gokd.exe -exec "C:\Windows\notepad.exe"         # spawn and attach with initial break
+bin\gokd.exe -dump C:\dumps\bsod.dmp                # open a crash dump
+bin\gokd.exe -kernel net:port=50000,key=1.2.3.4     # KDNET kernel attach
+bin\gokd.exe -pid 1234 -c "lm;k;r rip rsp;detach"   # non-interactive script
+```
+
+With no target flag, `gokd.exe` drops into an unattached REPL. Inside the REPL:
+
+```
+> ?
+Commands:
+  attach <pid>        attach to process
+  bp <addr|symbol>    set breakpoint
+  g | t | p | gu      go / step in / step over / step out
+  k                   stack
+  r [regs...]         registers
+  dq|dd|db <addr> [count]
+  lm                  modules
+  u <addr> [count]    disassemble
+  dt <module>!<type>  type fields
+  !<cmd>              raw dbgeng command (escape hatch)
+  q                   quit
+```
+
+`Ctrl+C` during execution issues a break-in; press it twice within two seconds to exit.
+
 ## Running tests
 
 `go test ./...` runs the user-mode tests against a freshly-spawned `notepad.exe`.
@@ -218,6 +253,8 @@ cshim/
   dispatch_thread.cpp    Dynamic dbgeng.dll load, UTF-8/16 helpers
   callbacks.cpp          IDebugEventCallbacksWide + IDebugOutputCallbacksWide
   Makefile               Builds lib/libgokd_shim.a (MinGW-w64)
+
+cmd/gokd/                Reference interactive debugger (REPL)
 
 PLAN.md, CLAUDE.md, README.md, LICENSE
 ```

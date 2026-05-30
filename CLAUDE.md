@@ -73,8 +73,15 @@ cshim/
   callbacks.cpp               (~330 lines) IDebugEventCallbacksWide + IDebugOutputCallbacksWide
   Makefile                    Builds lib/libgokd_shim.a with MinGW-w64
   test_dbgeng*.cpp            Standalone C++ scratch tests (compile separately, not in lib)
-  test_kernel.cpp             Standalone kernel-attach C++ test
+  test_kernel*.cpp            Standalone kernel-attach C++ probes (see commit 039f87c)
   test_which_dll.cpp          Diagnostic: which dbgeng.dll got loaded
+
+cmd/gokd/                     Reference interactive debugger (REPL); stdlib-only
+  main.go                     Flag parsing, session setup, signal handler
+  repl.go                     REPL loop, async output/event drainers
+  commands.go                 Command handlers (bp, g, k, r, lm, dt, u, ...)
+  format.go                   Hexdump, stack and register formatting
+  parse.go                    parseAddr (hex/sym/0x/0d), parseCount (L-prefix)
 
 PLAN.md, README.md, LICENSE
 ```
@@ -158,8 +165,9 @@ indicate working:
 - Async event + output channels delivered from CGo callbacks
 - Context-based cancellation for `Go/StepIn/StepOver/StepOut` and `AttachKernel`
 
-`PLAN.md` Phases 1–4c are largely implemented in the flat layout. Phase 4 (CLI/REPL,
-`cmd/gokd/`) and Phase 5 (`gokd-mcp` separate repo) are not yet present.
+`PLAN.md` Phases 1–4c are largely implemented in the flat layout. The interactive
+CLI/REPL lives at `cmd/gokd/` (build: `go build -o bin/gokd.exe ./cmd/gokd`).
+Phase 5 (`gokd-mcp` separate repo) is not yet present.
 
 ## Conventions
 
