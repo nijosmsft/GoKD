@@ -234,9 +234,13 @@ int32_t gokd_attach_process(gokd_session_t s, uint32_t pid, uint32_t flags);
 /*
  * Launch a new process under the debugger.
  * flags: DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS, etc.
+ * initial_break: nonzero = stop at the initial break-in (default
+ *   DbgEng behaviour). Zero = resume the target immediately after the
+ *   initial break, so the caller does not have to issue Go() to start
+ *   execution.
  */
 int32_t gokd_create_process(gokd_session_t s, const char *cmd,
-                             uint32_t flags);
+                             uint32_t flags, int initial_break);
 
 /*
  * Attach to a kernel target.

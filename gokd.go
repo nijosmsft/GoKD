@@ -394,7 +394,7 @@ func (s *session) AttachProcess(pid uint32, opts AttachOptions) error {
 }
 
 func (s *session) CreateProcess(cmd string, opts CreateOptions) error {
-	return s.inner.CreateProcess(cmd, opts.Flags)
+	return s.inner.CreateProcess(cmd, opts.Flags, opts.InitialBreak)
 }
 
 func (s *session) AttachKernel(ctx context.Context, connectStr string, opts KernelOptions) error {

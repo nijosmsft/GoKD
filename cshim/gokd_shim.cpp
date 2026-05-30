@@ -97,11 +97,20 @@ extern "C" int32_t gokd_attach_process(gokd_session_t handle,
 }
 
 extern "C" int32_t gokd_create_process(gokd_session_t handle,
-                                        const char *cmd, uint32_t flags) {
+                                        const char *cmd, uint32_t flags,
+                                        int initial_break) {
     S;
     HRESULT hr;
 
-    s->control->AddEngineOptions(DEBUG_ENGOPT_INITIAL_BREAK);
+    /* DbgEng's create-process flow always stops on the initial break;
+     * the engine option DEBUG_ENGOPT_INITIAL_BREAK controls whether
+     * subsequent breakpoint mechanisms also stop. Toggle it based on
+     * the caller's request. */
+    if (initial_break) {
+        s->control->AddEngineOptions(DEBUG_ENGOPT_INITIAL_BREAK);
+    } else {
+        s->control->RemoveEngineOptions(DEBUG_ENGOPT_INITIAL_BREAK);
+    }
 
     char cmd_copy[4096];
     strncpy(cmd_copy, cmd, sizeof(cmd_copy) - 1);
@@ -113,6 +122,15 @@ extern "C" int32_t gokd_create_process(gokd_session_t handle,
     if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
 
     hr = wait_for_event_cancellable(s, 30000);
+    if (FAILED(hr)) { SET_LAST_ERROR(hr); return hr; }
+
+    /* If the caller does not want to halt at the initial break, the
+     * wait above still returns once the loader stops. Resume the
+     * target so they see a running process. */
+    if (!initial_break) {
+        s->control->SetExecutionStatus(DEBUG_STATUS_GO);
+    }
+
     SET_LAST_ERROR(hr);
     return hr;
 }

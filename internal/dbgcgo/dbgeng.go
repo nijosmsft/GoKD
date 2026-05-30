@@ -170,12 +170,16 @@ func (s *Session) AttachProcess(pid uint32, flags uint32) error {
 	return hresult(hr)
 }
 
-func (s *Session) CreateProcess(cmd string, flags uint32) error {
+func (s *Session) CreateProcess(cmd string, flags uint32, initialBreak bool) error {
 	var hr C.int32_t
+	ib := C.int(0)
+	if initialBreak {
+		ib = 1
+	}
 	s.exec(func() {
 		ccmd := C.CString(cmd)
 		defer C.free(unsafe.Pointer(ccmd))
-		hr = C.gokd_create_process(s.handle, ccmd, C.uint32_t(flags))
+		hr = C.gokd_create_process(s.handle, ccmd, C.uint32_t(flags), ib)
 	})
 	return hresult(hr)
 }
