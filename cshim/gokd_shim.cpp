@@ -435,6 +435,91 @@ extern "C" int32_t gokd_read_physical(gokd_session_t handle, uint64_t addr,
 }
 
 /* ====================================================================== */
+/*  Memory search / translate / query (t1-6)                              */
+/* ====================================================================== */
+
+#ifndef GOKD_E_NOTFOUND
+#define GOKD_E_NOTFOUND ((int32_t)0x80000002)
+#endif
+
+/* DbgEng's SearchVirtual can come back with any of several "not found"
+ * HRESULTs depending on the build. Normalise to E_NOTFOUND so the Go
+ * layer can map it cleanly to ErrNotFound. */
+static int32_t map_search_hr(HRESULT hr) {
+    /* HRESULT_FROM_NT(STATUS_NOT_FOUND) */
+    if ((uint32_t)hr == 0xD0000225u) return GOKD_E_NOTFOUND;
+    /* HRESULT_FROM_WIN32(ERROR_NOT_FOUND) */
+    if ((uint32_t)hr == 0x80070490u) return GOKD_E_NOTFOUND;
+    /* HRESULT_FROM_NT(STATUS_NO_MORE_ENTRIES) — observed on current SDK builds. */
+    if ((uint32_t)hr == 0x9000001Au) return GOKD_E_NOTFOUND;
+    return hr;
+}
+
+extern "C" int32_t gokd_search_virtual(gokd_session_t handle,
+                                        uint64_t start,
+                                        uint64_t length,
+                                        const uint8_t *pattern,
+                                        uint32_t pattern_size,
+                                        uint32_t pattern_granularity,
+                                        uint64_t *out_match) {
+    S;
+    if (!pattern || pattern_size == 0 || !out_match) return E_INVALIDARG;
+    if (pattern_granularity != 1 && pattern_granularity != 4 &&
+        pattern_granularity != 8) {
+        return E_INVALIDARG;
+    }
+    ULONG64 match = 0;
+    HRESULT hr = s->data_spaces->SearchVirtual(
+        (ULONG64)start, (ULONG64)length,
+        (PVOID)pattern, (ULONG)pattern_size,
+        (ULONG)pattern_granularity, &match);
+    if (SUCCEEDED(hr)) {
+        *out_match = (uint64_t)match;
+        return S_OK;
+    }
+    int32_t mapped = map_search_hr(hr);
+    SET_LAST_ERROR(mapped);
+    return mapped;
+}
+
+extern "C" int32_t gokd_virtual_to_physical(gokd_session_t handle,
+                                             uint64_t va,
+                                             uint64_t *out_pa) {
+    S;
+    if (!out_pa) return E_INVALIDARG;
+    ULONG64 pa = 0;
+    HRESULT hr = s->data_spaces->VirtualToPhysical((ULONG64)va, &pa);
+    if (SUCCEEDED(hr)) {
+        *out_pa = (uint64_t)pa;
+        return S_OK;
+    }
+    SET_LAST_ERROR(hr);
+    return hr;
+}
+
+extern "C" int32_t gokd_query_virtual(gokd_session_t handle,
+                                       uint64_t va,
+                                       gokd_mem_region_t *out) {
+    S;
+    if (!out) return E_INVALIDARG;
+    MEMORY_BASIC_INFORMATION64 mbi = {};
+    HRESULT hr = s->data_spaces->QueryVirtual((ULONG64)va, &mbi);
+    if (SUCCEEDED(hr)) {
+        memset(out, 0, sizeof(*out));
+        out->base_address = (uint64_t)mbi.BaseAddress;
+        out->allocation_base = (uint64_t)mbi.AllocationBase;
+        out->allocation_protect = (uint32_t)mbi.AllocationProtect;
+        out->region_size = (uint64_t)mbi.RegionSize;
+        out->state = (uint32_t)mbi.State;
+        out->protect = (uint32_t)mbi.Protect;
+        out->type = (uint32_t)mbi.Type;
+        return S_OK;
+    }
+    SET_LAST_ERROR(hr);
+    return hr;
+}
+
+/* ====================================================================== */
 /*  Registers                                                             */
 /* ====================================================================== */
 

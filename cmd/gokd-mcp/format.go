@@ -19,6 +19,42 @@ func parseHexUint64(text, field string) (uint64, error) {
 	return strconv.ParseUint(t, 0, 64)
 }
 
+// parseHexBytes parses a hex pattern accepting either a contiguous run of
+// hex digits ("deadbeef") or whitespace-separated bytes ("de ad be ef").
+// Returns an error if the field is empty, the input contains non-hex
+// characters, or the digit count is odd.
+func parseHexBytes(text, field string) ([]byte, error) {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return nil, fmt.Errorf("%s is required", field)
+	}
+	// strip whitespace
+	var sb strings.Builder
+	for _, r := range t {
+		switch r {
+		case ' ', '\t', '\n', '\r':
+			continue
+		}
+		sb.WriteRune(r)
+	}
+	// strip optional 0x/0X prefix
+	s := sb.String()
+	if len(s) >= 2 && (s[:2] == "0x" || s[:2] == "0X") {
+		s = s[2:]
+	}
+	if len(s) == 0 {
+		return nil, fmt.Errorf("%s is required", field)
+	}
+	if len(s)%2 != 0 {
+		return nil, fmt.Errorf("%s must contain an even number of hex digits", field)
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", field, err)
+	}
+	return b, nil
+}
+
 func registerTypeString(t gokd.RegisterType) string {
 	switch t {
 	case gokd.RegisterInt8:

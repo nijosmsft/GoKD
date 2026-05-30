@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -247,6 +248,42 @@ type addBreakpointSourceLineInput struct {
 	Line uint32 `json:"line" jsonschema:"1-based source line"`
 }
 
+// --- t1-6 memory search / translate / query ---
+
+type searchMemoryInput struct {
+	StartHex    string `json:"start_hex" jsonschema:"start virtual address (hex, with or without 0x)"`
+	Length      uint64 `json:"length" jsonschema:"byte length to scan; keep small (<=4 KB) for performance"`
+	PatternHex  string `json:"pattern_hex" jsonschema:"byte pattern as contiguous hex (\"deadbeef\") or space-separated bytes (\"de ad be ef\")"`
+	Granularity uint32 `json:"granularity,omitempty" jsonschema:"stride DbgEng uses; must be 1, 4, or 8 (default 1)"`
+}
+
+type searchMemoryOutput struct {
+	Found    bool   `json:"found"`
+	MatchHex string `json:"match_hex"`
+}
+
+type virtualToPhysicalInput struct {
+	VAHex string `json:"va_hex" jsonschema:"virtual address (hex). Kernel-mode sessions only."`
+}
+
+type virtualToPhysicalOutput struct {
+	PAHex string `json:"pa_hex"`
+}
+
+type queryRegionInput struct {
+	VAHex string `json:"va_hex" jsonschema:"virtual address (hex) to look up"`
+}
+
+type queryRegionOutput struct {
+	BaseAddressHex       string `json:"base_address_hex"`
+	AllocationBaseHex    string `json:"allocation_base_hex"`
+	AllocationProtectHex string `json:"allocation_protect_hex"`
+	RegionSize           uint64 `json:"region_size"`
+	StateHex             string `json:"state_hex"`
+	ProtectHex           string `json:"protect_hex"`
+	TypeHex              string `json:"type_hex"`
+}
+
 func toolErr[Out any](err error) (*mcp.CallToolResult, Out, error) {
 	var zero Out
 	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, zero, nil
@@ -322,6 +359,11 @@ func registerTools(server *mcp.Server, s *srv) {
 	mcp.AddTool(server, &mcp.Tool{Name: "addr_to_line", Description: "Map an instruction address to its source (file, line, displacement) via IDebugSymbols3::GetLineByOffsetWide. Returns an error containing 'HRESULT 0x80000002' (E_NOTFOUND) when no line info is loaded for the address — install matching PDBs or run reload_symbols first."}, s.addrToLine)
 	mcp.AddTool(server, &mcp.Tool{Name: "line_to_addr", Description: "Map a (file, line) pair to an instruction address via IDebugSymbols3::GetOffsetByLineWide. The file path must be the canonical absolute path the PDB was built with; partial matches fail with E_NOTFOUND."}, s.lineToAddr)
 	mcp.AddTool(server, &mcp.Tool{Name: "add_breakpoint_source_line", Description: "Resolve a (file, line) pair to an address and install a code breakpoint there. Requires line-info PDBs for the target binary; otherwise fails with E_NOTFOUND."}, s.addBreakpointSourceLine)
+
+	// --- t1-6 memory search / translate / query ---
+	mcp.AddTool(server, &mcp.Tool{Name: "search_memory", Description: "Scan [start_hex, start_hex+length) for pattern_hex via IDebugDataSpaces4::SearchVirtual. granularity must be 1, 4, or 8 (defaults to 1). Returns {found:false, match_hex:\"\"} when the pattern is not present so callers can loop without exception handling. Keep length small (<= 4 KB) — SearchVirtual is slow on large ranges."}, s.searchMemory)
+	mcp.AddTool(server, &mcp.Tool{Name: "virtual_to_physical", Description: "Translate a virtual address to a physical address via IDebugDataSpaces4::VirtualToPhysical. Kernel-mode sessions only; user-mode targets fail with E_NOTIMPL or similar."}, s.virtualToPhysical)
+	mcp.AddTool(server, &mcp.Tool{Name: "query_region", Description: "Return the MEMORY_BASIC_INFORMATION64 record covering va_hex via IDebugDataSpaces4::QueryVirtual. Fields use raw Windows numerics: state (MEM_COMMIT=0x1000, MEM_RESERVE=0x2000, MEM_FREE=0x10000), type (MEM_PRIVATE=0x20000, MEM_MAPPED=0x40000, MEM_IMAGE=0x1000000), protect (PAGE_* flags)."}, s.queryRegion)
 }
 
 func (s *srv) attachProcess(ctx context.Context, _ *mcp.CallToolRequest, in attachProcessInput) (*mcp.CallToolResult, okOutput, error) {
@@ -932,4 +974,73 @@ func (s *srv) addBreakpointSourceLine(ctx context.Context, _ *mcp.CallToolReques
 		addr = bp.Address
 	}
 	return nil, addBreakpointOutput{ID: bp.ID, AddressHex: hex64(addr)}, nil
+}
+
+// --- t1-6 memory search / translate / query ---
+
+func (s *srv) searchMemory(ctx context.Context, _ *mcp.CallToolRequest, in searchMemoryInput) (*mcp.CallToolResult, searchMemoryOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[searchMemoryOutput](err)
+	}
+	start, err := parseHexUint64(in.StartHex, "start_hex")
+	if err != nil {
+		return toolErr[searchMemoryOutput](err)
+	}
+	if in.Length == 0 {
+		return toolErr[searchMemoryOutput](fmt.Errorf("length must be > 0"))
+	}
+	pattern, err := parseHexBytes(in.PatternHex, "pattern_hex")
+	if err != nil {
+		return toolErr[searchMemoryOutput](err)
+	}
+	gran := in.Granularity
+	if gran == 0 {
+		gran = 1
+	}
+	match, err := s.sess.SearchMemory(start, in.Length, pattern, gran)
+	if err != nil {
+		if errors.Is(err, gokd.ErrNotFound) {
+			return nil, searchMemoryOutput{Found: false, MatchHex: ""}, nil
+		}
+		return toolErr[searchMemoryOutput](err)
+	}
+	return nil, searchMemoryOutput{Found: true, MatchHex: hex64(match)}, nil
+}
+
+func (s *srv) virtualToPhysical(ctx context.Context, _ *mcp.CallToolRequest, in virtualToPhysicalInput) (*mcp.CallToolResult, virtualToPhysicalOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[virtualToPhysicalOutput](err)
+	}
+	va, err := parseHexUint64(in.VAHex, "va_hex")
+	if err != nil {
+		return toolErr[virtualToPhysicalOutput](err)
+	}
+	pa, err := s.sess.VirtualToPhysical(va)
+	if err != nil {
+		return toolErr[virtualToPhysicalOutput](err)
+	}
+	return nil, virtualToPhysicalOutput{PAHex: hex64(pa)}, nil
+}
+
+func (s *srv) queryRegion(ctx context.Context, _ *mcp.CallToolRequest, in queryRegionInput) (*mcp.CallToolResult, queryRegionOutput, error) {
+	if err := checkContext(ctx); err != nil {
+		return toolErr[queryRegionOutput](err)
+	}
+	va, err := parseHexUint64(in.VAHex, "va_hex")
+	if err != nil {
+		return toolErr[queryRegionOutput](err)
+	}
+	r, err := s.sess.QueryRegion(va)
+	if err != nil {
+		return toolErr[queryRegionOutput](err)
+	}
+	return nil, queryRegionOutput{
+		BaseAddressHex:       hex64(r.BaseAddress),
+		AllocationBaseHex:    hex64(r.AllocationBase),
+		AllocationProtectHex: fmt.Sprintf("0x%x", uint32(r.AllocationProtect)),
+		RegionSize:           r.RegionSize,
+		StateHex:             fmt.Sprintf("0x%x", uint32(r.State)),
+		ProtectHex:           fmt.Sprintf("0x%x", uint32(r.Protect)),
+		TypeHex:              fmt.Sprintf("0x%x", uint32(r.Type)),
+	}, nil
 }

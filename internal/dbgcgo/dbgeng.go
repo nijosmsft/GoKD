@@ -349,6 +349,81 @@ func (s *Session) ReadPhysical(addr uint64, n uint64) ([]byte, error) {
 	return buf[:int(bytesRead)], hresult(hr)
 }
 
+// ── Memory search / translate / query (t1-6) ─────────────────────────
+
+// MemoryState matches the MEM_* state values from WinNT.h.
+type MemoryState uint32
+
+// MemoryProtect matches the PAGE_* protection flags from WinNT.h.
+type MemoryProtect uint32
+
+// MemoryType matches the MEM_PRIVATE/MAPPED/IMAGE type values from WinNT.h.
+type MemoryType uint32
+
+// MemoryRegion mirrors MEMORY_BASIC_INFORMATION64.
+type MemoryRegion struct {
+	BaseAddress       uint64
+	AllocationBase    uint64
+	AllocationProtect MemoryProtect
+	RegionSize        uint64
+	State             MemoryState
+	Protect           MemoryProtect
+	Type              MemoryType
+}
+
+// SearchMemory scans [start, start+length) for pattern. granularity must
+// be 1, 4, or 8 (the DbgEng-imposed stride). Returns the match address
+// on hit, or (0, ErrNotFound) when no match.
+func (s *Session) SearchMemory(start, length uint64, pattern []byte, granularity uint32) (uint64, error) {
+	if len(pattern) == 0 {
+		return 0, fmt.Errorf("gokd: pattern is empty")
+	}
+	if granularity != 1 && granularity != 4 && granularity != 8 {
+		return 0, fmt.Errorf("gokd: granularity must be 1, 4, or 8")
+	}
+	var match C.uint64_t
+	var hr C.int32_t
+	s.exec(func() {
+		hr = C.gokd_search_virtual(s.handle,
+			C.uint64_t(start), C.uint64_t(length),
+			(*C.uint8_t)(unsafe.Pointer(&pattern[0])),
+			C.uint32_t(len(pattern)), C.uint32_t(granularity), &match)
+	})
+	return uint64(match), hresult(hr)
+}
+
+// VirtualToPhysical translates a virtual address to a physical one.
+// Kernel-mode only — user-mode targets fail with E_NOTIMPL or similar.
+func (s *Session) VirtualToPhysical(va uint64) (uint64, error) {
+	var pa C.uint64_t
+	var hr C.int32_t
+	s.exec(func() {
+		hr = C.gokd_virtual_to_physical(s.handle, C.uint64_t(va), &pa)
+	})
+	return uint64(pa), hresult(hr)
+}
+
+// QueryRegion returns the MEMORY_BASIC_INFORMATION64 record covering va.
+func (s *Session) QueryRegion(va uint64) (MemoryRegion, error) {
+	var c C.gokd_mem_region_t
+	var hr C.int32_t
+	s.exec(func() {
+		hr = C.gokd_query_virtual(s.handle, C.uint64_t(va), &c)
+	})
+	if err := hresult(hr); err != nil {
+		return MemoryRegion{}, err
+	}
+	return MemoryRegion{
+		BaseAddress:       uint64(c.base_address),
+		AllocationBase:    uint64(c.allocation_base),
+		AllocationProtect: MemoryProtect(c.allocation_protect),
+		RegionSize:        uint64(c.region_size),
+		State:             MemoryState(c.state),
+		Protect:           MemoryProtect(c.protect),
+		Type:              MemoryType(c._type),
+	}, nil
+}
+
 // ── Registers ─────────────────────────────────────────────────────────
 
 // Register mirrors gokd_register_t.

@@ -142,6 +142,14 @@ type Session interface {
 	LineToAddr(file string, line uint32) (uint64, error)
 	AddBreakpointSourceLine(file string, line uint32) (*Breakpoint, error)
 
+	// Memory search / translate / query (t1-6). SearchMemory returns
+	// (0, ErrNotFound) when the pattern is not present in the scanned
+	// range. VirtualToPhysical only works on kernel-mode sessions —
+	// user-mode targets fail with an HRESULT (commonly E_NOTIMPL).
+	SearchMemory(start, length uint64, pattern []byte, granularity uint32) (uint64, error)
+	VirtualToPhysical(va uint64) (uint64, error)
+	QueryRegion(va uint64) (MemoryRegion, error)
+
 	// Async streams
 	Events() <-chan Event
 	Output() <-chan string
@@ -544,6 +552,38 @@ func (e ExpressionSyntax) String() string {
 // SourceLine is the (file, line, displacement) triple returned by
 // AddrToLine.
 type SourceLine = dbgcgo.SourceLine
+
+// Memory-region types (t1-6) mirror the WinNT MEMORY_BASIC_INFORMATION64
+// fields. The numeric constants below are the most common values; see
+// winnt.h for the full list.
+type (
+	MemoryState   = dbgcgo.MemoryState
+	MemoryProtect = dbgcgo.MemoryProtect
+	MemoryType    = dbgcgo.MemoryType
+	MemoryRegion  = dbgcgo.MemoryRegion
+)
+
+const (
+	MemCommit  MemoryState = 0x1000
+	MemReserve MemoryState = 0x2000
+	MemFree    MemoryState = 0x10000
+
+	MemPrivate MemoryType = 0x20000
+	MemMapped  MemoryType = 0x40000
+	MemImage   MemoryType = 0x1000000
+
+	PageNoAccess         MemoryProtect = 0x01
+	PageReadOnly         MemoryProtect = 0x02
+	PageReadWrite        MemoryProtect = 0x04
+	PageWriteCopy        MemoryProtect = 0x08
+	PageExecute          MemoryProtect = 0x10
+	PageExecuteRead      MemoryProtect = 0x20
+	PageExecuteReadWrite MemoryProtect = 0x40
+	PageExecuteWriteCopy MemoryProtect = 0x80
+	PageGuard            MemoryProtect = 0x100
+	PageNoCache          MemoryProtect = 0x200
+	PageWriteCombine     MemoryProtect = 0x400
+)
 
 // Event types delivered on Session.Events().
 type Event interface{ isEvent() }
@@ -1051,6 +1091,20 @@ func (s *session) AddBreakpointSourceLine(file string, line uint32) (*Breakpoint
 		return nil, err
 	}
 	return s.AddBreakpoint(addr)
+}
+
+// --- Memory search / translate / query (t1-6) ---
+
+func (s *session) SearchMemory(start, length uint64, pattern []byte, granularity uint32) (uint64, error) {
+	return s.inner.SearchMemory(start, length, pattern, granularity)
+}
+
+func (s *session) VirtualToPhysical(va uint64) (uint64, error) {
+	return s.inner.VirtualToPhysical(va)
+}
+
+func (s *session) QueryRegion(va uint64) (MemoryRegion, error) {
+	return s.inner.QueryRegion(va)
 }
 
 func (s *session) Events() <-chan Event {

@@ -378,6 +378,54 @@ int32_t gokd_read_physical(gokd_session_t s, uint64_t addr,
                             void *buf, size_t len, size_t *out_read);
 
 /* ====================================================================== */
+/*  Memory search / translate / query (t1-6)                              */
+/* ====================================================================== */
+
+typedef struct gokd_mem_region_s {
+    uint64_t base_address;
+    uint64_t allocation_base;
+    uint32_t allocation_protect;
+    uint32_t _pad0;
+    uint64_t region_size;
+    uint32_t state;
+    uint32_t protect;
+    uint32_t type;
+    uint32_t _pad1;
+} gokd_mem_region_t;
+
+/*
+ * SearchVirtual scans [start, start+length) for the byte pattern. The
+ * pattern_granularity must be 1, 4, or 8 per DbgEng docs and controls the
+ * stride DbgEng uses while scanning. Returns E_NOTFOUND when no match —
+ * DbgEng's underlying NT/Win32 "not found" codes (0xD0000225, 0x80070490)
+ * are normalised onto 0x80000002 so callers can branch with errors.Is.
+ */
+int32_t gokd_search_virtual(gokd_session_t s,
+                             uint64_t start,
+                             uint64_t length,
+                             const uint8_t *pattern,
+                             uint32_t pattern_size,
+                             uint32_t pattern_granularity,
+                             uint64_t *out_match);
+
+/*
+ * Translate a virtual address to a physical address via
+ * IDebugDataSpaces4::VirtualToPhysical. Kernel-mode only — fails with
+ * E_NOTIMPL (or similar) in user-mode sessions.
+ */
+int32_t gokd_virtual_to_physical(gokd_session_t s,
+                                  uint64_t va,
+                                  uint64_t *out_pa);
+
+/*
+ * Query the MEMORY_BASIC_INFORMATION64 record covering va via
+ * IDebugDataSpaces4::QueryVirtual.
+ */
+int32_t gokd_query_virtual(gokd_session_t s,
+                            uint64_t va,
+                            gokd_mem_region_t *out);
+
+/* ====================================================================== */
 /*  Registers                                                             */
 /* ====================================================================== */
 
