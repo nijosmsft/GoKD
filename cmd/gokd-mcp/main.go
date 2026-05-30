@@ -7,7 +7,9 @@ package main
 import "C"
 
 import (
+	"bufio"
 	"context"
+	"crypto/subtle"
 	"flag"
 	"fmt"
 	"io"
@@ -15,6 +17,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/nijosmsft/gokd"
@@ -27,6 +30,7 @@ type config struct {
 	logJSON   bool
 	listen    string
 	remote    string
+	authToken string
 	readonly  bool
 	unsafeRaw bool
 }
@@ -88,11 +92,17 @@ func main() {
 	}
 
 	if cfg.listen != "" {
-		if err := runListen(cfg.listen, makeServer, logWriter); err != nil {
+		if cfg.authToken == "" {
+			fmt.Fprintln(logWriter, "[gokd-mcp] WARNING: -listen without -auth-token; any local process can connect.")
+		}
+		if err := runListen(cfg.listen, cfg.authToken, makeServer, logger, logWriter); err != nil {
 			fmt.Fprintf(os.Stderr, "listen failed: %v\n", err)
 			os.Exit(1)
 		}
 		return
+	}
+	if cfg.authToken != "" && cfg.remote == "" {
+		fmt.Fprintln(logWriter, "[gokd-mcp] note: -auth-token has no effect without -listen; stdio is inside the process boundary.")
 	}
 
 	if err := makeServer().Run(context.Background(), &mcp.StdioTransport{}); err != nil {
@@ -109,9 +119,20 @@ func parseFlags() config {
 	flag.BoolVar(&cfg.logJSON, "log-json", envBool("GOKD_MCP_LOG_JSON", false), "emit logs as JSON instead of text (env: GOKD_MCP_LOG_JSON)")
 	flag.StringVar(&cfg.listen, "listen", "", "serve MCP over TCP instead of stdio, e.g. 127.0.0.1:8765 (one client at a time)")
 	flag.StringVar(&cfg.remote, "remote", "", "run as a stdio proxy to a remote gokd-mcp on the named lablink node")
+	flag.StringVar(&cfg.authToken, "auth-token", envOr("GOKD_MCP_AUTH_TOKEN", ""), "require -listen clients to present this token via 'AUTH <token>\\n' before MCP starts. Min 16 chars, no whitespace. Empty (default) disables auth.")
 	flag.BoolVar(&cfg.readonly, "readonly", false, "reject any tool that can modify the target (writes, breakpoints, execution)")
 	flag.BoolVar(&cfg.unsafeRaw, "unsafe-raw", false, "with --readonly, allow execute_raw but enforce a command denylist")
 	flag.Parse()
+	if cfg.authToken != "" {
+		if strings.ContainsAny(cfg.authToken, "\r\n \t") {
+			fmt.Fprintln(os.Stderr, "-auth-token must not contain whitespace")
+			os.Exit(2)
+		}
+		if len(cfg.authToken) < 16 {
+			fmt.Fprintln(os.Stderr, "-auth-token must be at least 16 chars")
+			os.Exit(2)
+		}
+	}
 	return cfg
 }
 
@@ -179,23 +200,92 @@ func buildLogger(w io.Writer, level slog.Level, asJSON bool) *slog.Logger {
 // inherently single-client, so concurrent connections are intentionally
 // serialised: the next Accept does not happen until the active session
 // closes.
-func runListen(addr string, makeServer func() *mcp.Server, logWriter io.Writer) error {
+//
+// When authToken is non-empty, every accepted conn must complete a
+// "AUTH <token>\n" -> "OK\n" / "DENIED\n" handshake within 5s before any
+// MCP bytes are read. The handshake uses crypto/subtle for constant-time
+// comparison and never echoes the presented token. See t3-6 for the wire
+// format and rationale.
+func runListen(addr, authToken string, makeServer func() *mcp.Server, logger *slog.Logger, logWriter io.Writer) error {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 	defer listener.Close()
-	fmt.Fprintf(logWriter, "[gokd-mcp] listening on %s\n", listener.Addr())
+	fmt.Fprintf(logWriter, "[gokd-mcp] listening on %s (auth=%v)\n", listener.Addr(), authToken != "")
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			return fmt.Errorf("accept: %w", err)
 		}
-		fmt.Fprintf(logWriter, "[gokd-mcp] client connected: %s\n", conn.RemoteAddr())
+		peer := conn.RemoteAddr().String()
+		if err := authenticateConn(conn, authToken); err != nil {
+			if logger != nil {
+				logger.Warn("auth failed",
+					slog.String("peer", peer),
+					slog.String("err", err.Error()))
+			}
+			fmt.Fprintf(logWriter, "[gokd-mcp] auth failed from %s: %v\n", peer, err)
+			_ = conn.Close()
+			continue
+		}
+		fmt.Fprintf(logWriter, "[gokd-mcp] client connected: %s\n", peer)
 		serveConn(conn, makeServer(), logWriter)
-		fmt.Fprintf(logWriter, "[gokd-mcp] client disconnected: %s\n", conn.RemoteAddr())
+		fmt.Fprintf(logWriter, "[gokd-mcp] client disconnected: %s\n", peer)
 	}
+}
+
+// authenticateConn implements the t3-6 line-prefix handshake. When token
+// is empty it accepts the conn unconditionally (legacy behaviour). When
+// set, it reads up to one line within a 5s deadline, requires the form
+// "AUTH <token>\n" with a constant-time byte-compare against token, and
+// either writes "OK\n" + clears the deadline, or writes "DENIED\n" and
+// returns an error so the caller can close.
+//
+// The handshake is intentionally NOT MCP-spec: the spec has no session
+// auth at initialize-time today. A line-prefix in front of the JSON-RPC
+// stream is dropped trivially when an MCP-native mechanism appears.
+func authenticateConn(conn net.Conn, token string) error {
+	if token == "" {
+		return nil
+	}
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return fmt.Errorf("set deadline: %w", err)
+	}
+	br := bufio.NewReaderSize(conn, 1024)
+	line, err := br.ReadString('\n')
+	if err != nil {
+		_, _ = io.WriteString(conn, "DENIED\n")
+		return fmt.Errorf("read auth line: %w", err)
+	}
+	line = strings.TrimRight(line, "\r\n")
+	const prefix = "AUTH "
+	if !strings.HasPrefix(line, prefix) {
+		_, _ = io.WriteString(conn, "DENIED\n")
+		return fmt.Errorf("missing AUTH prefix")
+	}
+	presented := []byte(line[len(prefix):])
+	expected := []byte(token)
+	if len(presented) != len(expected) ||
+		subtle.ConstantTimeCompare(presented, expected) != 1 {
+		_, _ = io.WriteString(conn, "DENIED\n")
+		return fmt.Errorf("token mismatch")
+	}
+	if _, err := io.WriteString(conn, "OK\n"); err != nil {
+		return fmt.Errorf("write OK: %w", err)
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("clear deadline: %w", err)
+	}
+	// We require AUTH and the MCP first-byte to arrive in separate writes
+	// so the bufio reader holds nothing once handshake completes. Clients
+	// that pipeline (write "AUTH X\n{json...}" in a single packet) get
+	// rejected. The proxy in proxy.go does the right thing.
+	if br.Buffered() > 0 {
+		return fmt.Errorf("unexpected bytes after AUTH line")
+	}
+	return nil
 }
 
 func serveConn(conn net.Conn, server *mcp.Server, logWriter io.Writer) {
